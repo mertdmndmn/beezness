@@ -1,4 +1,4 @@
-const CACHE = "honey-till-v4";
+const CACHE = "honey-till-v5";
 const FILES = ["./", "./index.html", "./icon.png", "./manifest.json"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
