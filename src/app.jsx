@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 // ---- Supabase config -------------------------------------------------
 // Fill these in with your project's URL and anon (public) key — see
@@ -40,6 +40,36 @@ const isoDate = (d) => {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
+
+// ---- Z report styling (ExcelJS) -----------------------------------------
+const XLSX_MONEY_FMT = "#,##0.00";
+const XLSX_INT_FMT = "0";
+const XLSX_HEADER_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFBEEDD" } };
+const XLSX_SECTION_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2EFE9" } };
+const XLSX_BORDER = { style: "thin", color: { argb: "FFE7E2D8" } };
+
+function styleTitleRow(row) {
+  row.font = { bold: true, size: 13 };
+}
+function styleHeaderRow(row) {
+  row.font = { bold: true };
+  row.eachCell({ includeEmpty: true }, (cell) => {
+    cell.fill = XLSX_HEADER_FILL;
+    cell.border = { bottom: XLSX_BORDER };
+  });
+}
+function styleSectionRow(row) {
+  row.font = { bold: true };
+  row.eachCell({ includeEmpty: true }, (cell) => {
+    cell.fill = XLSX_SECTION_FILL;
+  });
+}
+function styleTotalRow(row) {
+  row.font = { bold: true };
+  row.eachCell({ includeEmpty: true }, (cell) => {
+    cell.border = { top: XLSX_BORDER };
+  });
+}
 
 function seedProduct(name, type, priceTi, priceLu) {
   return { id: uid(), name, type, price: { "loc-ti": priceTi, "loc-lu": priceLu } };
@@ -645,14 +675,24 @@ function App() {
     setToast({ msg: "Reset to a fresh install." });
   };
 
-  const downloadZReport = () => {
+  const downloadZReport = async () => {
     const day = new Date(reportDay);
     const locs = data.locations;
-    const salesRows = [
-      ["Z report", day.toLocaleDateString(), reportLoc === "all" ? "All places" : locationName(reportLoc)],
-      [],
-      ["Time", "Sale no.", "Place", "Market", "Item", "Category", "Qty", "List CHF", "Charged CHF", "Line total CHF", "Price", "Paid to", "Method", "Note"],
-      ...report.rows.map((s) => [
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "BeeZness";
+    wb.created = new Date();
+
+    // ---- Sales ----
+    const salesSheet = wb.addWorksheet("Sales", { views: [{ state: "frozen", ySplit: 3 }] });
+    salesSheet.columns = [8, 11, 11, 12, 24, 10, 6, 10, 12, 14, 10, 15, 11, 24].map((width) => ({ width }));
+
+    styleTitleRow(salesSheet.addRow(["Z report", day.toLocaleDateString(), reportLoc === "all" ? "All places" : locationName(reportLoc)]));
+    salesSheet.addRow([]);
+    styleHeaderRow(
+      salesSheet.addRow(["Time", "Sale no.", "Place", "Market", "Item", "Category", "Qty", "List CHF", "Charged CHF", "Line total CHF", "Price", "Paid to", "Method", "Note"])
+    );
+    report.rows.forEach((s) => {
+      const row = salesSheet.addRow([
         timeStr(s.ts),
         s.ticket,
         s.location,
@@ -667,71 +707,100 @@ function App() {
         s.account,
         s.method,
         s.note || "",
-      ]),
-      [],
-      ["", "", "", "", "", "", report.units, "", "", round2(report.total), "TOTAL", "", "", ""],
-      ["", "", "", "", "", "", report.gifts, "", "", "", "gifted jars", "", "", ""],
-      ["", "", "", "", "", "", "", "", "", round2(report.discount), "given as discount", "", "", ""],
-      [],
-      ["Per account", "CHF"],
-      ...Object.entries(report.byAcct).map(([k, v]) => [k, round2(v)]),
-      [],
-      ["Per place", "CHF"],
-      ...Object.entries(report.byLoc).map(([k, v]) => [k, round2(v)]),
-      [],
-      ["Per market", "CHF"],
-      ...Object.entries(report.byMarket).map(([k, v]) => [k, round2(v)]),
-      [],
-      ["Per item", "Qty", "CHF"],
-      ...Object.entries(report.byItem).map(([k, v]) => [k, v.qty, round2(v.sum)]),
-    ];
-    const salesSheet = XLSX.utils.aoa_to_sheet(salesRows);
-    salesSheet["!cols"] = [8, 11, 11, 12, 24, 10, 5, 10, 12, 14, 10, 15, 11, 24].map((wch) => ({ wch }));
+      ]);
+      row.getCell(7).numFmt = XLSX_INT_FMT;
+      [8, 9, 10].forEach((c) => (row.getCell(c).numFmt = XLSX_MONEY_FMT));
+    });
 
-    const stockRows = [
-      ["Stock", day.toLocaleDateString()],
-      [],
-      ["Item", "Category", "Units left", ...locs.map((l) => `${l.name} price CHF`), `Value at ${locs[0].name} CHF`],
-      ...data.products.map((p) => [
-        p.name,
-        p.type,
-        stockOf(p.id),
-        ...locs.map((l) => priceOf(p, l.id)),
-        round2(stockOf(p.id) * priceOf(p, locs[0].id)),
-      ]),
-      [],
-      [
-        "TOTAL",
-        "",
-        data.products.reduce((s, p) => s + stockOf(p.id), 0),
-        ...locs.map(() => ""),
-        round2(data.products.reduce((s, p) => s + stockOf(p.id) * priceOf(p, locs[0].id), 0)),
-      ],
-    ];
-    const stockSheet = XLSX.utils.aoa_to_sheet(stockRows);
-    stockSheet["!cols"] = [{ wch: 24 }, { wch: 10 }, { wch: 11 }, ...locs.map(() => ({ wch: 16 })), { wch: 18 }];
+    salesSheet.addRow([]);
+    const salesTotalRow = salesSheet.addRow(["", "", "", "", "", "", report.units, "", "", round2(report.total), "TOTAL", "", "", ""]);
+    salesTotalRow.getCell(7).numFmt = XLSX_INT_FMT;
+    salesTotalRow.getCell(10).numFmt = XLSX_MONEY_FMT;
+    styleTotalRow(salesTotalRow);
+    const giftsRow = salesSheet.addRow(["", "", "", "", "", "", report.gifts, "", "", "", "gifted jars", "", "", ""]);
+    giftsRow.getCell(7).numFmt = XLSX_INT_FMT;
+    const discountRow = salesSheet.addRow(["", "", "", "", "", "", "", "", "", round2(report.discount), "given as discount", "", "", ""]);
+    discountRow.getCell(10).numFmt = XLSX_MONEY_FMT;
 
-    const settleRows = [
-      ["Settlement with the common account", day.toLocaleDateString()],
-      [],
-      ["Person", "Holds money as", "Collected all time CHF", "Paid to common CHF", "Still owes CHF"],
-      ...settleInfo.rows.map((a) => [a.name, a.method, round2(a.collected), round2(a.paid), a.due]),
-      [],
-      ["", "", "", "TOTAL OUTSTANDING", round2(settleInfo.outstanding)],
-      [],
-      ["Transfers"],
-      ["Date", "Person", "Amount CHF", "Note"],
-      ...data.transfers.map((t) => [new Date(t.ts).toLocaleDateString(), t.name, round2(t.amount), t.note || ""]),
-    ];
-    const settleSheet = XLSX.utils.aoa_to_sheet(settleRows);
-    settleSheet["!cols"] = [20, 16, 21, 19, 16].map((wch) => ({ wch }));
+    const addMoneySection = (title, entries) => {
+      salesSheet.addRow([]);
+      styleSectionRow(salesSheet.addRow([title, "CHF"]));
+      entries.forEach(([k, v]) => {
+        salesSheet.addRow([k, round2(v)]).getCell(2).numFmt = XLSX_MONEY_FMT;
+      });
+    };
+    addMoneySection("Per account", Object.entries(report.byAcct));
+    addMoneySection("Per place", Object.entries(report.byLoc));
+    addMoneySection("Per market", Object.entries(report.byMarket));
 
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, salesSheet, "Sales");
-    XLSX.utils.book_append_sheet(wb, stockSheet, "Stock");
-    XLSX.utils.book_append_sheet(wb, settleSheet, "Settlement");
+    salesSheet.addRow([]);
+    styleSectionRow(salesSheet.addRow(["Per item", "Qty", "CHF"]));
+    Object.entries(report.byItem).forEach(([k, v]) => {
+      const row = salesSheet.addRow([k, v.qty, round2(v.sum)]);
+      row.getCell(2).numFmt = XLSX_INT_FMT;
+      row.getCell(3).numFmt = XLSX_MONEY_FMT;
+    });
+
+    // ---- Stock ----
+    const stockSheet = wb.addWorksheet("Stock", { views: [{ state: "frozen", ySplit: 3 }] });
+    stockSheet.columns = [24, 10, 11, ...locs.map(() => 16), 18].map((width) => ({ width }));
+
+    styleTitleRow(stockSheet.addRow(["Stock", day.toLocaleDateString()]));
+    stockSheet.addRow([]);
+    styleHeaderRow(stockSheet.addRow(["Item", "Category", "Units left", ...locs.map((l) => `${l.name} price CHF`), `Value at ${locs[0].name} CHF`]));
+    const valueColIdx = 4 + locs.length;
+    data.products.forEach((p) => {
+      const row = stockSheet.addRow([p.name, p.type, stockOf(p.id), ...locs.map((l) => priceOf(p, l.id)), round2(stockOf(p.id) * priceOf(p, locs[0].id))]);
+      row.getCell(3).numFmt = XLSX_INT_FMT;
+      locs.forEach((_, i) => (row.getCell(4 + i).numFmt = XLSX_MONEY_FMT));
+      row.getCell(valueColIdx).numFmt = XLSX_MONEY_FMT;
+    });
+    stockSheet.addRow([]);
+    const stockTotalRow = stockSheet.addRow([
+      "TOTAL",
+      "",
+      data.products.reduce((s, p) => s + stockOf(p.id), 0),
+      ...locs.map(() => ""),
+      round2(data.products.reduce((s, p) => s + stockOf(p.id) * priceOf(p, locs[0].id), 0)),
+    ]);
+    stockTotalRow.getCell(3).numFmt = XLSX_INT_FMT;
+    stockTotalRow.getCell(valueColIdx).numFmt = XLSX_MONEY_FMT;
+    styleTotalRow(stockTotalRow);
+
+    // ---- Settlement ----
+    const settleSheet = wb.addWorksheet("Settlement", { views: [{ state: "frozen", ySplit: 3 }] });
+    settleSheet.columns = [20, 16, 21, 19, 16].map((width) => ({ width }));
+
+    styleTitleRow(settleSheet.addRow(["Settlement with the common account", day.toLocaleDateString()]));
+    settleSheet.addRow([]);
+    styleHeaderRow(settleSheet.addRow(["Person", "Holds money as", "Collected all time CHF", "Paid to common CHF", "Still owes CHF"]));
+    settleInfo.rows.forEach((a) => {
+      const row = settleSheet.addRow([a.name, a.method, round2(a.collected), round2(a.paid), a.due]);
+      [3, 4, 5].forEach((c) => (row.getCell(c).numFmt = XLSX_MONEY_FMT));
+    });
+    settleSheet.addRow([]);
+    const outstandingRow = settleSheet.addRow(["", "", "", "TOTAL OUTSTANDING", round2(settleInfo.outstanding)]);
+    outstandingRow.getCell(5).numFmt = XLSX_MONEY_FMT;
+    styleTotalRow(outstandingRow);
+
+    settleSheet.addRow([]);
+    styleSectionRow(settleSheet.addRow(["Transfers"]));
+    styleHeaderRow(settleSheet.addRow(["Date", "Person", "Amount CHF", "Note"]));
+    data.transfers.forEach((t) => {
+      settleSheet.addRow([new Date(t.ts).toLocaleDateString(), t.name, round2(t.amount), t.note || ""]).getCell(3).numFmt = XLSX_MONEY_FMT;
+    });
+
     try {
-      XLSX.writeFile(wb, `Z-report-${isoDate(day)}.xlsx`);
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Z-report-${isoDate(day)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
       setToast({ msg: "Z report saved to your files." });
     } catch {
       setToast({ msg: "Download blocked here — use Copy as CSV." });
