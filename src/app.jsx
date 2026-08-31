@@ -262,12 +262,20 @@ function SignIn() {
     if (!email.trim() || !password || busy) return;
     setBusy(true);
     setErr("");
-    const { error } =
-      mode === "signup"
-        ? await supabase.auth.signUp({ email: email.trim(), password })
-        : await supabase.auth.signInWithPassword({ email: email.trim(), password });
-    setBusy(false);
-    if (error) setErr(error.message);
+    if (mode === "signup") {
+      const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+      setBusy(false);
+      if (error) setErr(error.message);
+      else if (!data.session) {
+        setErr(
+          'Account created, but it still needs email confirmation. In Supabase: Authentication → Providers → Email → turn off "Confirm email", then try signing in again — or check your inbox for a confirmation link.'
+        );
+      }
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      setBusy(false);
+      if (error) setErr(error.message);
+    }
   };
 
   return (
