@@ -769,7 +769,7 @@ function App() {
     }
   };
 
-  if (!authReady) return <div className="hl"><div className="empty">Opening the till…</div></div>;
+  if (!authReady) return <div className="hl"><div className="empty">Opening BeeZness…</div></div>;
   if (!session) {
     return (
       <div className="hl">
@@ -780,7 +780,7 @@ function App() {
       </div>
     );
   }
-  if (!ready) return <div className="hl"><div className="empty">Opening the till…</div></div>;
+  if (!ready) return <div className="hl"><div className="empty">Opening BeeZness…</div></div>;
 
   if (pickedProduct) {
     const listPrice = effectivePrice(pickedProduct);
@@ -1145,7 +1145,7 @@ function App() {
           </>
         )}
         <button className="ghost solid wide mt16" onClick={() => setSummaryMarket(null)}>
-          Back to till
+          Back to BeeZness
         </button>
       </div>
     );
