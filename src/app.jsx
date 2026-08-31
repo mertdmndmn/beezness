@@ -274,6 +274,7 @@ function App() {
   const [payNote, setPayNote] = useState("");
   const [marketDraft, setMarketDraft] = useState(null);
   const [summaryMarket, setSummaryMarket] = useState(null);
+  const [confirming, setConfirming] = useState(null); // "today" | "all" | "reset" | null
 
   // ---- auth: silent, automatic, no sign-in screen. Everyone who loads the
   // site gets an anonymous session (still "authenticated" for RLS purposes),
@@ -590,6 +591,58 @@ function App() {
     setPayAmount("");
     setPayNote("");
     setToast({ msg: `${account.name} settled CHF ${money(amt)}.` });
+  };
+
+  const clearTodaySales = () => {
+    const day = dayKey(Date.now());
+    const rows = data.sales.filter((s) => dayKey(s.ts) === day);
+    if (!rows.length) return;
+    save(
+      { sales: data.sales.filter((s) => dayKey(s.ts) !== day) },
+      rows.map((row) => ({ table: "sales", type: "delete", id: row.id }))
+    );
+    setConfirming(null);
+    setToast({ msg: `Cleared ${rows.length} sale${rows.length === 1 ? "" : "s"} from today.` });
+  };
+
+  const clearSalesAndTransfers = () => {
+    const ops = [
+      ...data.sales.map((row) => ({ table: "sales", type: "delete", id: row.id })),
+      ...data.transfers.map((row) => ({ table: "transfers", type: "delete", id: row.id })),
+    ];
+    save({ sales: [], transfers: [] }, ops);
+    setConfirming(null);
+    setToast({ msg: "All sales and transfers cleared." });
+  };
+
+  const resetEverything = () => {
+    const ops = [
+      ...data.sales.map((row) => ({ table: "sales", type: "delete", id: row.id })),
+      ...data.transfers.map((row) => ({ table: "transfers", type: "delete", id: row.id })),
+      ...data.markets.map((row) => ({ table: "markets", type: "delete", id: row.id })),
+      ...data.batches.map((row) => ({ table: "batches", type: "delete", id: row.id })),
+      ...data.products.map((row) => ({ table: "products", type: "delete", id: row.id })),
+      ...data.accounts.map((row) => ({ table: "accounts", type: "delete", id: row.id })),
+      ...data.locations.map((row) => ({ table: "locations", type: "delete", id: row.id })),
+      ...DEFAULT_LOCATIONS.map((row) => ({ table: "locations", type: "insert", id: row.id, row })),
+      ...DEFAULT_PRODUCTS.map((row) => ({ table: "products", type: "insert", id: row.id, row })),
+      ...DEFAULT_ACCOUNTS.map((row) => ({ table: "accounts", type: "insert", id: row.id, row })),
+    ];
+    save(
+      {
+        locations: DEFAULT_LOCATIONS,
+        products: DEFAULT_PRODUCTS,
+        accounts: DEFAULT_ACCOUNTS,
+        batches: [],
+        sales: [],
+        transfers: [],
+        markets: [],
+      },
+      ops
+    );
+    setActiveLoc(DEFAULT_LOCATIONS[0].id);
+    setConfirming(null);
+    setToast({ msg: "Reset to a fresh install." });
   };
 
   const downloadZReport = () => {
@@ -1757,6 +1810,101 @@ function App() {
           >
             Add account
           </button>
+
+          <hr className="rule" />
+          <h2>Danger zone</h2>
+          {(() => {
+            const todayCount = data.sales.filter((s) => dayKey(s.ts) === dayKey(Date.now())).length;
+            const allCount = data.sales.length + data.transfers.length;
+            const resetCount =
+              data.locations.length +
+              data.products.length +
+              data.accounts.length +
+              data.batches.length +
+              data.sales.length +
+              data.transfers.length +
+              data.markets.length;
+            return (
+              <>
+                <button
+                  className="ghost danger wide mt8"
+                  disabled={todayCount === 0}
+                  onClick={() => setConfirming(confirming === "today" ? null : "today")}
+                >
+                  Clear today's sales
+                </button>
+                {confirming === "today" && (
+                  <div
+                    style={{ background: "var(--clay-soft)", border: "1px solid var(--clay)", borderRadius: 14, padding: "14px 15px", marginTop: 8 }}
+                  >
+                    <div style={{ fontSize: 14, lineHeight: 1.5 }}>
+                      Deletes {todayCount} sale{todayCount === 1 ? "" : "s"} from today and returns those jars to stock.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      <button className="ghost" onClick={() => setConfirming(null)}>
+                        Cancel
+                      </button>
+                      <button className="ghost danger solid" onClick={clearTodaySales}>
+                        Clear today's sales
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  className="ghost danger wide mt8"
+                  disabled={allCount === 0}
+                  onClick={() => setConfirming(confirming === "all" ? null : "all")}
+                >
+                  Clear all sales and transfers
+                </button>
+                {confirming === "all" && (
+                  <div
+                    style={{ background: "var(--clay-soft)", border: "1px solid var(--clay)", borderRadius: 14, padding: "14px 15px", marginTop: 8 }}
+                  >
+                    <div style={{ fontSize: 14, lineHeight: 1.5 }}>
+                      Deletes {data.sales.length} sale{data.sales.length === 1 ? "" : "s"} and {data.transfers.length} transfer
+                      {data.transfers.length === 1 ? "" : "s"}. Products, prices, places and accounts stay untouched, and every
+                      sold jar returns to stock. This cannot be undone.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      <button className="ghost" onClick={() => setConfirming(null)}>
+                        Cancel
+                      </button>
+                      <button className="ghost danger solid" onClick={clearSalesAndTransfers}>
+                        Clear sales &amp; transfers
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  className="ghost danger wide mt8"
+                  onClick={() => setConfirming(confirming === "reset" ? null : "reset")}
+                >
+                  Reset everything
+                </button>
+                {confirming === "reset" && (
+                  <div
+                    style={{ background: "var(--clay-soft)", border: "1px solid var(--clay)", borderRadius: 14, padding: "14px 15px", marginTop: 8 }}
+                  >
+                    <div style={{ fontSize: 14, lineHeight: 1.5 }}>
+                      Deletes everything — {resetCount} record{resetCount === 1 ? "" : "s"} across places, products, accounts,
+                      stock, sales, transfers and markets — and reinstalls the starting sample data. This cannot be undone.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      <button className="ghost" onClick={() => setConfirming(null)}>
+                        Cancel
+                      </button>
+                      <button className="ghost danger solid" onClick={resetEverything}>
+                        Reset everything
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </>
       )}
 

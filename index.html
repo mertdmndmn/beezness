@@ -89,6 +89,12 @@ input.mini{width:78px;min-width:0;padding:9px;text-align:right}
 .ghost.solid:hover{filter:brightness(1.06);background:var(--honey)}
 .ghost.wide{width:100%;padding:14px;font-size:14px}
 .ghost.tiny{padding:8px 10px;min-height:38px;font-size:12px}
+.ghost.danger{border-color:var(--clay);color:var(--clay)}
+.ghost.danger:hover{background:var(--clay-soft)}
+.ghost.danger.solid{background:var(--clay);color:#fff;border-color:var(--clay)}
+.ghost.danger.solid:hover{filter:brightness(1.06);background:var(--clay)}
+.ghost[disabled]{opacity:.4;cursor:default}
+.ghost[disabled]:hover{background:transparent}
 
 .row{display:flex;align-items:center;gap:9px;padding:11px 0;border-bottom:1px solid var(--comb)}
 .row .grow{flex:1;min-width:0}
