@@ -253,54 +253,64 @@ function EditableField({ value, onCommit, mono, cls, style, placeholder, list })
 
 function SignIn() {
   const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState("signin"); // "signin" | "signup"
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const send = async () => {
-    if (!email.trim() || busy) return;
+  const submit = async () => {
+    if (!email.trim() || !password || busy) return;
     setBusy(true);
     setErr("");
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: { emailRedirectTo: window.location.origin + window.location.pathname },
-    });
+    const { error } =
+      mode === "signup"
+        ? await supabase.auth.signUp({ email: email.trim(), password })
+        : await supabase.auth.signInWithPassword({ email: email.trim(), password });
     setBusy(false);
     if (error) setErr(error.message);
-    else setSent(true);
   };
 
   return (
     <div className="hl">
       <div className="top">
         <div>
-          <h1>Honey till</h1>
-          <div className="cap">Sign in to open the till</div>
+          <h1>BeeZness</h1>
+          <div className="cap">{mode === "signup" ? "Create an account" : "Sign in to open the till"}</div>
         </div>
       </div>
-      {sent ? (
-        <div className="empty">Check {email} for a sign-in link, then open it on this phone.</div>
-      ) : (
-        <>
-          <div className="cap mb6 mt16">Email</div>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="you@example.com"
-            style={{ fontFamily: "'Barlow',sans-serif" }}
-          />
-          {err && (
-            <div className="cap mt12" style={{ color: "var(--clay)" }}>
-              {err}
-            </div>
-          )}
-          <button className="ghost solid wide mt16" onClick={send} disabled={busy}>
-            {busy ? "Sending…" : "Send magic link"}
-          </button>
-        </>
+      <div className="cap mb6 mt16">Email</div>
+      <input
+        type="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        placeholder="you@example.com"
+        style={{ fontFamily: "'Barlow',sans-serif" }}
+      />
+      <div className="cap mb6 mt16">Password</div>
+      <input
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+        placeholder="••••••••"
+      />
+      {err && (
+        <div className="cap mt12" style={{ color: "var(--clay)" }}>
+          {err}
+        </div>
       )}
+      <button className="ghost solid wide mt16" onClick={submit} disabled={busy}>
+        {busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}
+      </button>
+      <button
+        className="ghost wide mt8"
+        onClick={() => {
+          setMode(mode === "signup" ? "signin" : "signup");
+          setErr("");
+        }}
+      >
+        {mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}
+      </button>
     </div>
   );
 }
@@ -1255,7 +1265,7 @@ function App() {
     <div className="hl">
       <div className="top">
         <div>
-          <h1>Honey till</h1>
+          <h1>BeeZness</h1>
           <div className="cap">{new Date().toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}</div>
         </div>
         <div style={{ textAlign: "right" }}>
