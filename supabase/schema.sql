@@ -70,12 +70,30 @@ create table if not exists transfers (
   note text
 );
 
+-- A market day: a named event with its own product/price picks, pulled from
+-- (but not overwriting) a location's normal price list. Sales made while a
+-- market is active record its id/name alongside the usual location/account.
+create table if not exists markets (
+  id text primary key,
+  name text not null,
+  "locId" text not null,
+  items jsonb not null default '[]'::jsonb,
+  "startedAt" bigint not null,
+  "endedAt" bigint
+);
+
+-- Additive: which market (if any) a sale belongs to. Nullable so existing
+-- sales rows are unaffected.
+alter table sales add column if not exists "marketId" text;
+alter table sales add column if not exists market text;
+
 alter table locations enable row level security;
 alter table products  enable row level security;
 alter table accounts  enable row level security;
 alter table batches   enable row level security;
 alter table sales     enable row level security;
 alter table transfers enable row level security;
+alter table markets   enable row level security;
 
 -- Single shared workspace: any signed-in user may read/write everything.
 create policy "authenticated full access" on locations for all
@@ -89,6 +107,8 @@ create policy "authenticated full access" on batches for all
 create policy "authenticated full access" on sales for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "authenticated full access" on transfers for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+create policy "authenticated full access" on markets for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 -- Realtime: on most Supabase projects the "supabase_realtime" publication

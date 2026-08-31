@@ -14,8 +14,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers"];
-const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [] };
+const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets"];
+const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [] };
 
 const CACHE_KEY = "honey-till-cache-v1";
 const OUTBOX_KEY = "honey-till-outbox-v1";
@@ -309,7 +309,7 @@ function App() {
   const [authReady, setAuthReady] = useState(false);
   const [session, setSession] = useState(null);
   const [ready, setReady] = useState(false);
-  const [data, setData] = useState(() => loadCache() || EMPTY_DATA);
+  const [data, setData] = useState(() => ({ ...EMPTY_DATA, ...loadCache() }));
 
   const [tab, setTab] = useState("sell");
   const [activeLoc, setActiveLoc] = useState(() => (loadCache()?.locations || [])[0]?.id || "");
@@ -326,6 +326,8 @@ function App() {
   const [settlingId, setSettlingId] = useState(null);
   const [payAmount, setPayAmount] = useState("");
   const [payNote, setPayNote] = useState("");
+  const [marketDraft, setMarketDraft] = useState(null);
+  const [summaryMarket, setSummaryMarket] = useState(null);
 
   // ---- auth ----
   useEffect(() => {
@@ -460,6 +462,17 @@ function App() {
   const inCartQty = (pid) => cart.filter((l) => l.pid === pid).reduce((s, l) => s + l.qty, 0);
   const cartTotal = cart.reduce((s, l) => s + l.qty * l.price, 0);
 
+  const activeMarket = data.markets.find((m) => !m.endedAt) || null;
+  const homeTab = activeMarket ? "market" : "sell";
+  const contextLocId = activeMarket ? activeMarket.locId : activeLoc;
+  const effectivePrice = (product) => {
+    if (activeMarket) {
+      const item = activeMarket.items.find((i) => i.pid === product.id);
+      if (item) return Number(item.price) || 0;
+    }
+    return priceOf(product);
+  };
+
   const today = useMemo(() => {
     const day = dayKey(Date.now());
     const list = data.sales.filter((s) => dayKey(s.ts) === day && s.locId === activeLoc);
@@ -490,12 +503,14 @@ function App() {
     const byAcct = {};
     const byItem = {};
     const byLoc = {};
+    const byMarket = {};
     let gifts = 0;
     let discount = 0;
     rows.forEach((s) => {
       const acctKey = `${s.account} · ${s.method}`;
       byAcct[acctKey] = (byAcct[acctKey] || 0) + s.qty * s.price;
       byLoc[s.location] = (byLoc[s.location] || 0) + s.qty * s.price;
+      if (s.marketId) byMarket[s.market] = (byMarket[s.market] || 0) + s.qty * s.price;
       const itemKey = `${s.name} · ${s.location}`;
       byItem[itemKey] = byItem[itemKey] || { qty: 0, sum: 0 };
       byItem[itemKey].qty += s.qty;
@@ -508,6 +523,7 @@ function App() {
       total: rows.reduce((s, x) => s + x.qty * x.price, 0),
       units: rows.reduce((s, x) => s + x.qty, 0),
       tickets: new Set(rows.map((s) => s.ticket)).size,
+      byMarket,
       gifts,
       discount,
       byAcct,
@@ -533,13 +549,13 @@ function App() {
   const pickProduct = (product) => {
     setPickedProduct(product);
     setQty(1);
-    setUnitPrice(priceOf(product));
+    setUnitPrice(effectivePrice(product));
     setPriceMode("full");
   };
 
   const addToCart = (goToPay) => {
     const product = pickedProduct;
-    const list = priceOf(product);
+    const list = effectivePrice(product);
     const price = priceMode === "gift" ? 0 : Number(unitPrice) || 0;
     const next = [...cart];
     const idx = next.findIndex((l) => l.pid === product.id && l.price === price && l.mode === priceMode);
@@ -547,7 +563,7 @@ function App() {
     else next.push({ pid: product.id, name: product.name, type: product.type, price, list, mode: priceMode, qty });
     setCart(next);
     setPickedProduct(null);
-    setTab(goToPay ? "pay" : "sell");
+    setTab(goToPay ? "pay" : homeTab);
   };
 
   const checkout = (account) => {
@@ -566,11 +582,13 @@ function App() {
       mode: l.mode,
       qty: l.qty,
       note: note.trim(),
-      locId: activeLoc,
-      location: locationName(activeLoc),
+      locId: contextLocId,
+      location: locationName(contextLocId),
       accountId: account.id,
       account: account.name,
       method: account.method,
+      marketId: activeMarket ? activeMarket.id : null,
+      market: activeMarket ? activeMarket.name : null,
     }));
     save(
       { sales: [...lines, ...data.sales] },
@@ -581,7 +599,7 @@ function App() {
     setNote("");
     setTab("done");
     setTimeout(() => {
-      setTab((cur) => (cur === "done" ? "sell" : cur));
+      setTab((cur) => (cur === "done" ? homeTab : cur));
       setToast({ msg: `CHF ${money(total)} → ${account.name}`, undo: ticket });
     }, 1600);
   };
@@ -594,6 +612,17 @@ function App() {
       rows.map((row) => ({ table: "sales", type: "delete", id: row.id }))
     );
     setToast(null);
+  };
+
+  const endMarket = () => {
+    const endedAt = Date.now();
+    const ended = { ...activeMarket, endedAt };
+    save(
+      { markets: data.markets.map((m) => (m.id === activeMarket.id ? ended : m)) },
+      [{ table: "markets", type: "update", id: activeMarket.id, row: { endedAt } }]
+    );
+    setSummaryMarket(ended);
+    setTab("sell");
   };
 
   const recordPayment = (account) => {
@@ -613,11 +642,12 @@ function App() {
     const salesRows = [
       ["Z report", day.toLocaleDateString(), reportLoc === "all" ? "All places" : locationName(reportLoc)],
       [],
-      ["Time", "Sale no.", "Place", "Item", "Category", "Qty", "List CHF", "Charged CHF", "Line total CHF", "Price", "Paid to", "Method", "Note"],
+      ["Time", "Sale no.", "Place", "Market", "Item", "Category", "Qty", "List CHF", "Charged CHF", "Line total CHF", "Price", "Paid to", "Method", "Note"],
       ...report.rows.map((s) => [
         timeStr(s.ts),
         s.ticket,
         s.location,
+        s.market || "",
         s.name,
         s.type,
         s.qty,
@@ -630,9 +660,9 @@ function App() {
         s.note || "",
       ]),
       [],
-      ["", "", "", "", "", report.units, "", "", round2(report.total), "TOTAL", "", "", ""],
-      ["", "", "", "", "", report.gifts, "", "", "", "gifted jars", "", "", ""],
-      ["", "", "", "", "", "", "", "", round2(report.discount), "given as discount", "", "", ""],
+      ["", "", "", "", "", "", report.units, "", "", round2(report.total), "TOTAL", "", "", ""],
+      ["", "", "", "", "", "", report.gifts, "", "", "", "gifted jars", "", "", ""],
+      ["", "", "", "", "", "", "", "", "", round2(report.discount), "given as discount", "", "", ""],
       [],
       ["Per account", "CHF"],
       ...Object.entries(report.byAcct).map(([k, v]) => [k, round2(v)]),
@@ -640,11 +670,14 @@ function App() {
       ["Per place", "CHF"],
       ...Object.entries(report.byLoc).map(([k, v]) => [k, round2(v)]),
       [],
+      ["Per market", "CHF"],
+      ...Object.entries(report.byMarket).map(([k, v]) => [k, round2(v)]),
+      [],
       ["Per item", "Qty", "CHF"],
       ...Object.entries(report.byItem).map(([k, v]) => [k, v.qty, round2(v.sum)]),
     ];
     const salesSheet = XLSX.utils.aoa_to_sheet(salesRows);
-    salesSheet["!cols"] = [8, 11, 11, 24, 10, 5, 10, 12, 14, 10, 15, 11, 24].map((wch) => ({ wch }));
+    salesSheet["!cols"] = [8, 11, 11, 12, 24, 10, 5, 10, 12, 14, 10, 15, 11, 24].map((wch) => ({ wch }));
 
     const stockRows = [
       ["Stock", day.toLocaleDateString()],
@@ -697,13 +730,14 @@ function App() {
   };
 
   const copyCsv = async () => {
-    const lines = ["Time,Sale no.,Place,Item,Qty,List CHF,Charged CHF,Line total CHF,Price,Paid to,Method,Note"];
+    const lines = ["Time,Sale no.,Place,Market,Item,Qty,List CHF,Charged CHF,Line total CHF,Price,Paid to,Method,Note"];
     report.rows.forEach((s) =>
       lines.push(
         [
           timeStr(s.ts),
           s.ticket,
           s.location,
+          s.market || "",
           s.name,
           s.qty,
           money(s.list),
@@ -731,7 +765,7 @@ function App() {
   if (!ready) return <div className="hl"><div className="empty">Opening the till…</div></div>;
 
   if (pickedProduct) {
-    const listPrice = priceOf(pickedProduct);
+    const listPrice = effectivePrice(pickedProduct);
     const available = stockOf(pickedProduct.id) - inCartQty(pickedProduct.id);
     const maxQty = Math.max(1, available);
     const previewPrice = priceMode === "gift" ? 0 : Number(unitPrice) || 0;
@@ -742,7 +776,7 @@ function App() {
         </button>
         <div style={{ marginTop: 18 }}>
           <div className="cap">
-            {pickedProduct.type} · {locationName(activeLoc)}
+            {pickedProduct.type} · {locationName(contextLocId)}
           </div>
           <h1 className="xl">{pickedProduct.name}</h1>
           <div className="num sub">
@@ -823,11 +857,11 @@ function App() {
   if (tab === "pay") {
     return (
       <div className="hl">
-        <button className="ghost" onClick={() => setTab("sell")}>
+        <button className="ghost" onClick={() => setTab(homeTab)}>
           ← Back
         </button>
         <div style={{ margin: "18px 0 12px" }}>
-          <div className="cap">{locationName(activeLoc)}</div>
+          <div className="cap">{locationName(contextLocId)}</div>
           <h1 className="xl">CHF {money(cartTotal)}</h1>
         </div>
         {cart.map((l, i) => (
@@ -896,10 +930,323 @@ function App() {
           <div className="cap mt12">
             paid to {receipt.account} · {receipt.method}
           </div>
-          <button className="ghost" style={{ marginTop: 26 }} onClick={() => setTab("sell")}>
+          <button className="ghost" style={{ marginTop: 26 }} onClick={() => setTab(homeTab)}>
             Next sale
           </button>
         </div>
+      </div>
+    );
+  }
+
+  if (tab === "marketSetup1" && marketDraft) {
+    const marketNames = [...new Set(data.markets.map((m) => m.name))];
+    return (
+      <div className="hl">
+        <button className="ghost" onClick={() => setTab("sell")}>
+          ← Back
+        </button>
+        <div style={{ marginTop: 18 }}>
+          <h1 className="xl">Start market day</h1>
+        </div>
+        <div className="cap mb6 mt16">Market name</div>
+        <input
+          list="marketnames"
+          placeholder="e.g. Sunday market, Lugano"
+          value={marketDraft.name}
+          onChange={(e) => setMarketDraft({ ...marketDraft, name: e.target.value })}
+          style={{ fontFamily: "'Barlow',sans-serif" }}
+        />
+        <datalist id="marketnames">
+          {marketNames.map((n) => (
+            <option key={n} value={n} />
+          ))}
+        </datalist>
+        <div className="cap mb6 mt16">Start from which place's prices?</div>
+        <div className="seg">
+          {data.locations.map((l) => (
+            <button
+              key={l.id}
+              data-on={marketDraft.locId === l.id ? "1" : "0"}
+              onClick={() => setMarketDraft({ ...marketDraft, locId: l.id })}
+            >
+              {l.name}
+            </button>
+          ))}
+        </div>
+        <button
+          className="ghost solid wide mt16"
+          disabled={!marketDraft.name.trim()}
+          onClick={() => {
+            setMarketDraft((d) => ({
+              ...d,
+              items: data.products.map((p) => ({ pid: p.id, checked: false, price: priceOf(p, d.locId) })),
+            }));
+            setTab("marketSetup2");
+          }}
+        >
+          Next
+        </button>
+      </div>
+    );
+  }
+
+  if (tab === "marketSetup2" && marketDraft) {
+    const isEditing = !!activeMarket;
+    const confirmSetup = () => {
+      const ticked = marketDraft.items.filter((i) => i.checked).map((i) => ({ pid: i.pid, price: Number(i.price) || 0 }));
+      if (isEditing) {
+        save(
+          { markets: data.markets.map((m) => (m.id === activeMarket.id ? { ...m, items: ticked } : m)) },
+          [{ table: "markets", type: "update", id: activeMarket.id, row: { items: ticked } }]
+        );
+      } else {
+        const row = {
+          id: uid(),
+          name: marketDraft.name.trim() || "Market",
+          locId: marketDraft.locId,
+          items: ticked,
+          startedAt: Date.now(),
+          endedAt: null,
+        };
+        save({ markets: [row, ...data.markets] }, [{ table: "markets", type: "insert", id: row.id, row }]);
+      }
+      setMarketDraft(null);
+      setTab("market");
+    };
+    return (
+      <div className="hl">
+        <button
+          className="ghost"
+          onClick={() => {
+            if (isEditing) {
+              setMarketDraft(null);
+              setTab("market");
+            } else {
+              setTab("marketSetup1");
+            }
+          }}
+        >
+          ← Back
+        </button>
+        <div style={{ marginTop: 18 }}>
+          <h1 className="xl">What are we selling today?</h1>
+          <div className="cap sub">{marketDraft.name || locationName(marketDraft.locId)}</div>
+        </div>
+        <div className="empty pt0">Tick what's in the car, and adjust the price for this market if it's different.</div>
+        {marketDraft.items.map((item, i) => {
+          const product = data.products.find((p) => p.id === item.pid);
+          if (!product) return null;
+          return (
+            <div key={item.pid} className="prod">
+              <div className="prod-line">
+                <button
+                  className="chip"
+                  data-on={item.checked ? "1" : "0"}
+                  onClick={() =>
+                    setMarketDraft((d) => ({
+                      ...d,
+                      items: d.items.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)),
+                    }))
+                  }
+                >
+                  {item.checked ? "✓ " : ""}
+                  {product.name}
+                </button>
+                <span className="lbl">CHF</span>
+                <EditableField
+                  mono
+                  cls="mini"
+                  value={item.price}
+                  onCommit={(v) =>
+                    setMarketDraft((d) => ({
+                      ...d,
+                      items: d.items.map((x, j) => (j === i ? { ...x, price: v } : x)),
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          );
+        })}
+        <button className="ghost solid wide mt14" onClick={confirmSetup}>
+          {isEditing ? "Save today's table" : "Start market"}
+        </button>
+      </div>
+    );
+  }
+
+  if (summaryMarket) {
+    const rows = data.sales.filter((s) => s.marketId === summaryMarket.id);
+    const total = rows.reduce((s, x) => s + x.qty * x.price, 0);
+    const units = rows.reduce((s, x) => s + x.qty, 0);
+    const byItem = {};
+    const byAcct = {};
+    rows.forEach((s) => {
+      byItem[s.name] = byItem[s.name] || { qty: 0, sum: 0 };
+      byItem[s.name].qty += s.qty;
+      byItem[s.name].sum += s.qty * s.price;
+      byAcct[s.account] = (byAcct[s.account] || 0) + s.qty * s.price;
+    });
+    return (
+      <div className="hl">
+        <div style={{ marginTop: 18 }}>
+          <div className="cap">Market day done</div>
+          <h1 className="xl">{summaryMarket.name}</h1>
+        </div>
+        <div className="stat">
+          <div>
+            <div className="cap">Takings</div>
+            <div className="n">{money(total)}</div>
+          </div>
+          <div>
+            <div className="cap">Jars sold</div>
+            <div className="n">{units}</div>
+          </div>
+        </div>
+        <hr className="rule" />
+        <div className="cap">Per product</div>
+        {Object.keys(byItem).length === 0 && <div className="empty">Nothing sold.</div>}
+        {Object.entries(byItem).map(([k, v]) => (
+          <div className="row" key={k}>
+            <div className="grow">
+              <div className="t">{k}</div>
+              <div className="s">{v.qty} sold</div>
+            </div>
+            <div className="v">{money(v.sum)}</div>
+          </div>
+        ))}
+        {Object.keys(byAcct).length > 0 && (
+          <>
+            <div className="cap mt16">Per account</div>
+            {Object.entries(byAcct).map(([k, v]) => (
+              <div className="row" key={k}>
+                <div className="grow t">{k}</div>
+                <div className="v">{money(v)}</div>
+              </div>
+            ))}
+          </>
+        )}
+        <button className="ghost solid wide mt16" onClick={() => setSummaryMarket(null)}>
+          Back to till
+        </button>
+      </div>
+    );
+  }
+
+  if (activeMarket) {
+    const marketSales = data.sales.filter((s) => s.marketId === activeMarket.id);
+    const marketUnits = marketSales.reduce((s, x) => s + x.qty, 0);
+    const marketCash = marketSales.reduce((s, x) => s + x.qty * x.price, 0);
+    const marketProducts = activeMarket.items.map((item) => data.products.find((p) => p.id === item.pid)).filter(Boolean);
+    return (
+      <div className="hl">
+        <div className="top">
+          <div>
+            <h1>{activeMarket.name}</h1>
+            <div className="cap">Market day</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div className="big">
+              <small>CHF</small>
+              {money(marketCash)}
+            </div>
+            <div className="cap" style={{ marginTop: 4 }}>
+              {marketUnits} sold
+            </div>
+          </div>
+        </div>
+
+        {marketProducts.length === 0 && (
+          <div className="empty">No products picked for today — use "Edit today's table" below.</div>
+        )}
+        <div className="tiles">
+          {marketProducts.map((p) => {
+            const available = stockOf(p.id) - inCartQty(p.id);
+            return (
+              <button key={p.id} className="tile" disabled={available <= 0} onClick={() => pickProduct(p)}>
+                {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
+                <b>{p.name}</b>
+                <div className="pr">CHF {money(effectivePrice(p))}</div>
+                <div className="st" data-low={available <= 3 ? "1" : "0"}>
+                  {available > 0 ? `${available} left` : "sold out"}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {cart.length > 0 && (
+          <div className="bag">
+            <div className="cap">This sale</div>
+            {cart.map((l, i) => (
+              <div className="line" key={i}>
+                <span>
+                  {l.qty}× {l.name}
+                  {l.mode === "gift" ? " (gift)" : l.price < l.list ? " (reduced)" : ""}
+                </span>
+                <span>
+                  <span className="num">{money(l.qty * l.price)}</span>
+                  <button className="x" onClick={() => setCart(cart.filter((_, j) => j !== i))} aria-label="Remove line">
+                    ×
+                  </button>
+                </span>
+              </div>
+            ))}
+            <div className="tot">
+              <span className="cap">Total</span>
+              <span className="big">
+                <small>CHF</small>
+                {money(cartTotal)}
+              </span>
+            </div>
+            <button className="ghost solid wide" onClick={() => setTab("pay")}>
+              Note &amp; account →
+            </button>
+          </div>
+        )}
+
+        <hr className="rule" />
+        <div className="cap">Today's sales</div>
+        {marketSales.length === 0 && <div className="empty">Nothing sold yet.</div>}
+        {marketSales.map((s) => (
+          <div className="row" key={s.id}>
+            <div className="grow">
+              <div className="t">
+                {s.qty}× {s.name}
+                {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
+              </div>
+              <div className="s">
+                {timeStr(s.ts)} · {s.account}
+                {s.note ? ` · ${s.note}` : ""}
+              </div>
+            </div>
+            <div className="v">{money(s.qty * s.price)}</div>
+            <button className="x" onClick={() => deleteTicket(s.ticket)} aria-label="Delete this sale">
+              ×
+            </button>
+          </div>
+        ))}
+
+        <hr className="rule" />
+        <button
+          className="ghost wide"
+          onClick={() => {
+            setMarketDraft({
+              name: activeMarket.name,
+              locId: activeMarket.locId,
+              items: data.products.map((p) => {
+                const found = activeMarket.items.find((i) => i.pid === p.id);
+                return { pid: p.id, checked: !!found, price: found ? found.price : priceOf(p, activeMarket.locId) };
+              }),
+            });
+            setTab("marketSetup2");
+          }}
+        >
+          Edit today's table
+        </button>
+        <button className="ghost wide mt8" onClick={endMarket}>
+          End market day
+        </button>
       </div>
     );
   }
@@ -955,6 +1302,17 @@ function App() {
 
       {tab === "sell" && (
         <>
+          <button
+            className="ghost solid wide"
+            style={{ marginBottom: 16 }}
+            onClick={() => {
+              setMarketDraft({ name: "", locId: activeLoc || (data.locations[0] || {}).id || "", items: [] });
+              setTab("marketSetup1");
+            }}
+          >
+            Start market day
+          </button>
+
           {data.products.length === 0 && (
             <div className="empty">Nothing to sell yet. Open Admin and add your honey, candles and balms.</div>
           )}
