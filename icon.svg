@@ -1,0 +1,27 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="115" fill="#C2760F"/>
+  <g fill="#F7F5F1" opacity="0.55">
+    <ellipse cx="196" cy="205" rx="52" ry="80" transform="rotate(-28 196 205)"/>
+    <ellipse cx="316" cy="205" rx="52" ry="80" transform="rotate(28 316 205)"/>
+  </g>
+  <path d="M234 372 L278 372 L256 404 Z" fill="#1D1A16"/>
+  <defs>
+    <clipPath id="bodyClip">
+      <ellipse cx="256" cy="290" rx="112" ry="88"/>
+    </clipPath>
+  </defs>
+  <ellipse cx="256" cy="290" rx="112" ry="88" fill="#F7F5F1"/>
+  <g clip-path="url(#bodyClip)">
+    <rect x="144" y="245" width="224" height="26" rx="13" fill="#1D1A16"/>
+    <rect x="144" y="300" width="224" height="26" rx="13" fill="#1D1A16"/>
+  </g>
+  <ellipse cx="256" cy="188" rx="60" ry="56" fill="#F7F5F1"/>
+  <circle cx="234" cy="182" r="10" fill="#1D1A16"/>
+  <circle cx="278" cy="182" r="10" fill="#1D1A16"/>
+  <g stroke="#1D1A16" stroke-width="7" stroke-linecap="round" fill="none">
+    <path d="M240 145 Q220 105 200 92"/>
+    <path d="M272 145 Q292 105 312 92"/>
+  </g>
+  <circle cx="200" cy="92" r="8" fill="#1D1A16"/>
+  <circle cx="312" cy="92" r="8" fill="#1D1A16"/>
+</svg>
