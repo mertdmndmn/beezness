@@ -251,78 +251,6 @@ function EditableField({ value, onCommit, mono, cls, style, placeholder, list })
   );
 }
 
-function SignIn() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [mode, setMode] = useState("signin"); // "signin" | "signup"
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const submit = async () => {
-    if (!email.trim() || !password || busy) return;
-    setBusy(true);
-    setErr("");
-    if (mode === "signup") {
-      const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
-      setBusy(false);
-      if (error) setErr(error.message);
-      else if (!data.session) {
-        setErr(
-          'Account created, but it still needs email confirmation. In Supabase: Authentication → Providers → Email → turn off "Confirm email", then try signing in again — or check your inbox for a confirmation link.'
-        );
-      }
-    } else {
-      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-      setBusy(false);
-      if (error) setErr(error.message);
-    }
-  };
-
-  return (
-    <div className="hl">
-      <div className="top">
-        <div>
-          <h1>BeeZness</h1>
-          <div className="cap">{mode === "signup" ? "Create an account" : "Sign in to open the till"}</div>
-        </div>
-      </div>
-      <div className="cap mb6 mt16">Email</div>
-      <input
-        type="email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        placeholder="you@example.com"
-        style={{ fontFamily: "'Barlow',sans-serif" }}
-      />
-      <div className="cap mb6 mt16">Password</div>
-      <input
-        type="password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        placeholder="••••••••"
-      />
-      {err && (
-        <div className="cap mt12" style={{ color: "var(--clay)" }}>
-          {err}
-        </div>
-      )}
-      <button className="ghost solid wide mt16" onClick={submit} disabled={busy}>
-        {busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}
-      </button>
-      <button
-        className="ghost wide mt8"
-        onClick={() => {
-          setMode(mode === "signup" ? "signin" : "signup");
-          setErr("");
-        }}
-      >
-        {mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}
-      </button>
-    </div>
-  );
-}
-
 function App() {
   const [authReady, setAuthReady] = useState(false);
   const [session, setSession] = useState(null);
@@ -347,14 +275,24 @@ function App() {
   const [marketDraft, setMarketDraft] = useState(null);
   const [summaryMarket, setSummaryMarket] = useState(null);
 
-  // ---- auth ----
+  // ---- auth: silent, automatic, no sign-in screen. Everyone who loads the
+  // site gets an anonymous session (still "authenticated" for RLS purposes),
+  // so this is a shared-link tool, not an access-controlled one.
   useEffect(() => {
     let cancelled = false;
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
       if (cancelled) return;
-      setSession(session);
+      if (session) {
+        setSession(session);
+        setAuthReady(true);
+        return;
+      }
+      const { data, error } = await supabase.auth.signInAnonymously();
+      if (cancelled) return;
+      if (!error) setSession(data.session);
       setAuthReady(true);
-    });
+    })();
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       setAuthReady(true);
@@ -779,7 +717,16 @@ function App() {
   };
 
   if (!authReady) return <div className="hl"><div className="empty">Opening the till…</div></div>;
-  if (!session) return <SignIn />;
+  if (!session) {
+    return (
+      <div className="hl">
+        <div className="empty">
+          Couldn't connect. Check your internet connection and reload — if this keeps happening, anonymous sign-ins
+          may need to be turned on in Supabase (Authentication → Settings → Anonymous sign-ins).
+        </div>
+      </div>
+    );
+  }
   if (!ready) return <div className="hl"><div className="empty">Opening the till…</div></div>;
 
   if (pickedProduct) {
@@ -1809,12 +1756,6 @@ function App() {
             }}
           >
             Add account
-          </button>
-
-          <hr className="rule" />
-          <div className="cap">Signed in as {session.user.email}</div>
-          <button className="ghost mt8" onClick={() => supabase.auth.signOut()}>
-            Sign out
           </button>
         </>
       )}
