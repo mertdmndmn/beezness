@@ -963,7 +963,7 @@ function App() {
     );
   }
 
-  if (tab === "pay") {
+  if (tab === "pay" && !cashAccount) {
     return (
       <div className="hl">
         <button className="ghost" onClick={() => setTab(homeTab)}>
