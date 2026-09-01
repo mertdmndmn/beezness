@@ -87,6 +87,10 @@ create table if not exists markets (
 alter table sales add column if not exists "marketId" text;
 alter table sales add column if not exists market text;
 
+-- Additive: cash tendered and change given, only set for cash sales.
+alter table sales add column if not exists "cashReceived" numeric;
+alter table sales add column if not exists "cashChange" numeric;
+
 alter table locations enable row level security;
 alter table products  enable row level security;
 alter table accounts  enable row level security;

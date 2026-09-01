@@ -33,6 +33,24 @@ const uid = () =>
 
 const money = (n) => (Math.round(n * 100) / 100).toFixed(2);
 const round2 = (n) => Math.round(n * 100) / 100;
+const round5 = (n) => Math.round(n / 0.05) * 0.05;
+
+// Quick cash amounts above the total: nearest 5 (coin round), then the
+// Swiss note denominations. Capped at 4 so the row fits on a phone.
+function roundCashOptions(total) {
+  const steps = [5, 10, 20, 50, 100, 200];
+  const seen = new Set();
+  const options = [];
+  for (const step of steps) {
+    const val = Math.ceil(total / step) * step;
+    if (val > total + 0.001 && !seen.has(val)) {
+      seen.add(val);
+      options.push(val);
+    }
+    if (options.length >= 4) break;
+  }
+  return options;
+}
 const dayKey = (ts) => new Date(ts).toDateString();
 const timeStr = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const shortDate = (ts) => new Date(ts).toLocaleDateString([], { day: "2-digit", month: "short" });
@@ -292,6 +310,8 @@ function App() {
   const [cart, setCart] = useState([]);
   const [note, setNote] = useState("");
   const [pickedProduct, setPickedProduct] = useState(null);
+  const [cashAccount, setCashAccount] = useState(null);
+  const [cashInput, setCashInput] = useState("");
   const [qty, setQty] = useState(1);
   const [unitPrice, setUnitPrice] = useState(0);
   const [priceMode, setPriceMode] = useState("full");
@@ -553,7 +573,7 @@ function App() {
     setTab(goToPay ? "pay" : homeTab);
   };
 
-  const checkout = (account) => {
+  const checkout = (account, cashInfo) => {
     const ticket = uid();
     const ts = Date.now();
     const total = cartTotal;
@@ -576,6 +596,8 @@ function App() {
       method: account.method,
       marketId: activeMarket ? activeMarket.id : null,
       market: activeMarket ? activeMarket.name : null,
+      cashReceived: cashInfo ? cashInfo.received : null,
+      cashChange: cashInfo ? cashInfo.change : null,
     }));
     save(
       { sales: [...lines, ...data.sales] },
@@ -981,7 +1003,18 @@ function App() {
         <div className="cap mt16 mb6">Which account is it going to?</div>
         {data.accounts.length === 0 && <div className="empty">No accounts yet. Add them in Admin first.</div>}
         {data.accounts.map((a) => (
-          <button key={a.id} className="who" onClick={() => checkout(a)}>
+          <button
+            key={a.id}
+            className="who"
+            onClick={() => {
+              if (a.method === "Cash") {
+                setCashAccount(a);
+                setCashInput("");
+              } else {
+                checkout(a);
+              }
+            }}
+          >
             <b>{a.name}</b>
             <span>
               {a.method}
@@ -989,6 +1022,92 @@ function App() {
             </span>
           </button>
         ))}
+      </div>
+    );
+  }
+
+  if (cashAccount) {
+    const total = cartTotal;
+    const roundOptions = roundCashOptions(total);
+    const received = parseFloat(String(cashInput).replace(",", "."));
+    const hasAmount = cashInput.trim() !== "" && !isNaN(received);
+    const rawChange = hasAmount ? received - total : null;
+    const sufficient = hasAmount && rawChange >= -0.001;
+    const roundedChange = sufficient ? round5(rawChange) : null;
+    const wasRounded = sufficient && Math.abs(rawChange - roundedChange) > 0.001;
+
+    const complete = () => {
+      if (!sufficient) return;
+      checkout(cashAccount, { received: round2(received), change: roundedChange });
+      setCashAccount(null);
+      setCashInput("");
+    };
+
+    return (
+      <div className="hl">
+        <button
+          className="ghost"
+          onClick={() => {
+            setCashAccount(null);
+            setCashInput("");
+          }}
+        >
+          ← Back
+        </button>
+        <div style={{ marginTop: 18 }}>
+          <div className="cap">Cash · {cashAccount.name}</div>
+          <div className="big">
+            <small>CHF</small>
+            {money(total)}
+          </div>
+        </div>
+
+        <div className="cap mb6 mt16">Amount received</div>
+        <div className="chips">
+          <button className="chip" data-on={cashInput === money(total) ? "1" : "0"} onClick={() => setCashInput(money(total))}>
+            CHF {money(total)}
+          </button>
+          {roundOptions.map((v) => (
+            <button key={v} className="chip" data-on={cashInput === String(v) ? "1" : "0"} onClick={() => setCashInput(String(v))}>
+              {v}
+            </button>
+          ))}
+        </div>
+
+        <div className="cap mb6 mt16">Or type an amount</div>
+        <input
+          inputMode="decimal"
+          value={cashInput}
+          onChange={(e) => setCashInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
+          placeholder={money(total)}
+        />
+
+        {hasAmount &&
+          (sufficient ? (
+            <div style={{ marginTop: 30, textAlign: "center" }}>
+              <div className="cap">Change</div>
+              <div className="num" style={{ fontSize: 52, fontWeight: 700, color: "var(--sage)", lineHeight: 1, marginTop: 6 }}>
+                {money(roundedChange)}
+              </div>
+              {wasRounded && (
+                <div className="cap mt8" style={{ textTransform: "none", letterSpacing: 0 }}>
+                  Rounded from CHF {money(rawChange)} — 1 and 2 rappen don't exist
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ marginTop: 30, textAlign: "center" }}>
+              <div className="cap">Still missing</div>
+              <div className="num" style={{ fontSize: 40, fontWeight: 700, color: "var(--clay)", lineHeight: 1, marginTop: 6 }}>
+                {money(Math.abs(rawChange))}
+              </div>
+            </div>
+          ))}
+
+        <button className="ghost solid wide mt16" disabled={!sufficient} onClick={complete}>
+          Done
+        </button>
       </div>
     );
   }
