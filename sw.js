@@ -1,4 +1,4 @@
-const CACHE = "beezness-v5";
+const CACHE = "beezness-v6";
 const FILES = ["./", "./index.html", "./app.js", "./icon.png", "./manifest.json"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
@@ -12,7 +12,13 @@ self.addEventListener("activate", (e) => {
 const NETWORK_FIRST_SUFFIXES = ["/", "/index.html", "/honey-till.html", "/app.js"];
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
-  const path = new URL(e.request.url).pathname;
+  const url = new URL(e.request.url);
+  // Only this app's own same-origin files go through the cache logic below.
+  // Everything else (the Supabase API, in particular) must always hit the
+  // network live — caching a REST response here silently froze sales,
+  // products, etc. at whatever they were the first time each URL was seen.
+  if (url.origin !== self.location.origin) return;
+  const path = url.pathname;
   const networkFirst = NETWORK_FIRST_SUFFIXES.some((suffix) => path.endsWith(suffix));
   if (networkFirst) {
     // A plain cache:"no-store" only stops the browser's own HTTP cache —
