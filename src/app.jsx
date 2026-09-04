@@ -19,9 +19,11 @@ const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sal
 
 const CACHE_KEY = "honey-till-cache-v1";
 const OUTBOX_KEY = "honey-till-outbox-v1";
+const FAILED_OUTBOX_KEY = "honey-till-outbox-failed-v1";
 const LEGACY_KEY = "honey-till-v5"; // last on-device-only schema, kept for one-time import
 const MIGRATED_FLAG = "honey-till-migrated-v1";
 const SEEDED_FLAG = "honey-till-seeded-v1";
+const DISMISSED_MARKET_KEY = "honey-till-dismissed-market";
 
 const PRODUCT_TYPES = ["Honey", "Candle", "Lip balm", "Other"];
 const PAYMENT_METHODS = ["TWINT", "Cash", "Bank transfer"];
@@ -123,6 +125,21 @@ function loadCache() {
     return null;
   }
 }
+// Which market (if any) this specific phone chose to leave without ending
+// it for everyone else. Cleared implicitly once that market is no longer
+// the open one.
+function loadDismissedMarket() {
+  try {
+    return localStorage.getItem(DISMISSED_MARKET_KEY);
+  } catch {
+    return null;
+  }
+}
+function saveDismissedMarket(id) {
+  try {
+    localStorage.setItem(DISMISSED_MARKET_KEY, id);
+  } catch {}
+}
 function saveCache(data) {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(data));
@@ -141,11 +158,35 @@ function saveOutbox(list) {
     localStorage.setItem(OUTBOX_KEY, JSON.stringify(list));
   } catch {}
 }
+function loadFailedOutbox() {
+  try {
+    const raw = localStorage.getItem(FAILED_OUTBOX_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+function saveFailedOutbox(list) {
+  try {
+    localStorage.setItem(FAILED_OUTBOX_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+// The UI subscribes here to react to outbox/failure changes that happen
+// outside React (enqueue, flush, permanent failure) without polling.
+const outboxListeners = new Set();
+const outboxFailureListeners = new Set();
+function notifyOutbox() {
+  const snapshot = { pending: loadOutbox().length, failed: loadFailedOutbox() };
+  outboxListeners.forEach((fn) => fn(snapshot));
+}
+
 function enqueueOps(ops) {
   if (!ops || !ops.length) return;
   const q = loadOutbox();
   q.push(...ops.map((o) => ({ opId: uid(), ...o })));
   saveOutbox(q);
+  notifyOutbox();
   flushOutbox();
 }
 
@@ -173,10 +214,24 @@ async function flushOutbox() {
       const op = q[0];
       try {
         await applyOp(op);
-      } catch {
+      } catch (err) {
+        if (err && err.code) {
+          // The server actually answered and rejected this write (bad
+          // foreign key, RLS, stale id from a since-replaced project) —
+          // retrying changes nothing, and leaving it at the head of the
+          // queue would jam every write behind it forever. Park it.
+          saveOutbox(loadOutbox().filter((x) => x.opId !== op.opId));
+          const failed = loadFailedOutbox();
+          failed.push({ ...op, error: err.message || String(err), code: err.code, failedAt: Date.now() });
+          saveFailedOutbox(failed);
+          notifyOutbox();
+          outboxFailureListeners.forEach((fn) => fn(op));
+          continue;
+        }
         break; // offline or server hiccup — stop, keep order, retry later
       }
       saveOutbox(loadOutbox().filter((x) => x.opId !== op.opId));
+      notifyOutbox();
     }
   } finally {
     flushing = false;
@@ -312,6 +367,8 @@ function App() {
   const [pickedProduct, setPickedProduct] = useState(null);
   const [cashAccount, setCashAccount] = useState(null);
   const [cashInput, setCashInput] = useState("");
+  const [dismissedMarket, setDismissedMarket] = useState(loadDismissedMarket);
+  const [outboxStatus, setOutboxStatus] = useState({ pending: 0, failed: [] });
   const [qty, setQty] = useState(1);
   const [unitPrice, setUnitPrice] = useState(0);
   const [priceMode, setPriceMode] = useState("full");
@@ -423,6 +480,27 @@ function App() {
     };
   }, [Boolean(session)]);
 
+  // ---- surface outbox state, and drop cache rows whose write was
+  // permanently rejected (e.g. an id from a project that no longer exists)
+  // instead of leaving a phantom row on screen ----
+  useEffect(() => {
+    outboxListeners.add(setOutboxStatus);
+    setOutboxStatus({ pending: loadOutbox().length, failed: loadFailedOutbox() });
+    const onFailure = (op) => {
+      if (op.type !== "insert") return;
+      setData((d) => {
+        const next = { ...d, [op.table]: (d[op.table] || []).filter((r) => r.id !== op.id) };
+        saveCache(next);
+        return next;
+      });
+    };
+    outboxFailureListeners.add(onFailure);
+    return () => {
+      outboxListeners.delete(setOutboxStatus);
+      outboxFailureListeners.delete(onFailure);
+    };
+  }, []);
+
   // ---- realtime: other phones' changes land here without a refresh ----
   useEffect(() => {
     if (!session) return;
@@ -469,7 +547,8 @@ function App() {
   const inCartQty = (pid) => cart.filter((l) => l.pid === pid).reduce((s, l) => s + l.qty, 0);
   const cartTotal = cart.reduce((s, l) => s + l.qty * l.price, 0);
 
-  const activeMarket = data.markets.find((m) => !m.endedAt) || null;
+  const openMarket = data.markets.find((m) => !m.endedAt) || null;
+  const activeMarket = openMarket && openMarket.id !== dismissedMarket ? openMarket : null;
   const homeTab = activeMarket ? "market" : "sell";
   const contextLocId = activeMarket ? activeMarket.locId : activeLoc;
   const effectivePrice = (product) => {
@@ -479,6 +558,33 @@ function App() {
     }
     return priceOf(product);
   };
+
+  // ---- guard against a market that's stale on this phone: ended, or
+  // deleted, elsewhere while it was offline. Markets have the worst signal
+  // of anywhere this app runs, so this can't wait for the next full sync —
+  // it re-checks on load and whenever connectivity comes back. ----
+  useEffect(() => {
+    if (!session || !openMarket) return;
+    let cancelled = false;
+    const verify = async () => {
+      const { data: rows, error } = await supabase.from("markets").select("id,endedAt").eq("id", openMarket.id);
+      if (cancelled || error) return; // can't confirm — leave it, try again later
+      const stillOpen = rows.length && !rows[0].endedAt;
+      if (!stillOpen) {
+        setData((d) => {
+          const next = { ...d, markets: d.markets.filter((m) => m.id !== openMarket.id) };
+          saveCache(next);
+          return next;
+        });
+      }
+    };
+    verify();
+    window.addEventListener("online", verify);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", verify);
+    };
+  }, [Boolean(session), openMarket && openMarket.id]);
 
   const today = useMemo(() => {
     const day = dayKey(Date.now());
@@ -622,6 +728,51 @@ function App() {
     );
     setToast(null);
   };
+
+  const retryFailedOp = (opId) => {
+    const failed = loadFailedOutbox();
+    const op = failed.find((x) => x.opId === opId);
+    if (!op) return;
+    saveFailedOutbox(failed.filter((x) => x.opId !== opId));
+    const { error, code, failedAt, ...clean } = op;
+    const q = loadOutbox();
+    q.push(clean);
+    saveOutbox(q);
+    notifyOutbox();
+    flushOutbox();
+  };
+
+  const discardFailedOp = (opId) => {
+    saveFailedOutbox(loadFailedOutbox().filter((x) => x.opId !== opId));
+    notifyOutbox();
+  };
+
+  const syncFailurePanel = outboxStatus.failed.length > 0 && (
+    <div
+      style={{ background: "var(--clay-soft)", border: "1px solid var(--clay)", borderRadius: 14, padding: "14px 15px", margin: "0 0 12px" }}
+    >
+      <div style={{ fontSize: 14, lineHeight: 1.5, fontWeight: 600 }}>
+        ⚠ {outboxStatus.failed.length} write{outboxStatus.failed.length === 1 ? "" : "s"} rejected by the server — these won't
+        retry on their own
+      </div>
+      {outboxStatus.failed.map((op) => (
+        <div key={op.opId} style={{ marginTop: 10, fontSize: 13 }}>
+          <div>
+            <b>{op.type}</b> · {op.table} · {new Date(op.failedAt).toLocaleString()}
+          </div>
+          <div style={{ opacity: 0.8 }}>{op.error}</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+            <button className="ghost" onClick={() => retryFailedOp(op.opId)}>
+              Retry
+            </button>
+            <button className="ghost danger" onClick={() => discardFailedOp(op.opId)}>
+              Discard
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 
   const endMarket = () => {
     const endedAt = Date.now();
@@ -1362,6 +1513,8 @@ function App() {
           </div>
         </div>
 
+        {syncFailurePanel}
+
         {marketProducts.length === 0 && (
           <div className="empty">No products picked for today — use "Edit today's table" below.</div>
         )}
@@ -1453,6 +1606,16 @@ function App() {
         <button className="ghost wide mt8" onClick={endMarket}>
           End market day
         </button>
+        <button
+          className="ghost wide mt8"
+          onClick={() => {
+            saveDismissedMarket(activeMarket.id);
+            setDismissedMarket(activeMarket.id);
+            setTab("sell");
+          }}
+        >
+          Leave market mode
+        </button>
       </div>
     );
   }
@@ -1474,6 +1637,8 @@ function App() {
           </div>
         </div>
       </div>
+
+      {syncFailurePanel}
 
       <div className="seg">
         {data.locations.map((l) => (
