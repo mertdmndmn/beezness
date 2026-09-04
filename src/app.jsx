@@ -2014,6 +2014,9 @@ function App() {
 
       {tab === "admin" && (
         <>
+          <button className="ghost wide mb6" onClick={() => window.location.reload()}>
+            Refresh app
+          </button>
           <h2>Products</h2>
           <div className="empty pt0">One stock for everything you own. Each place has its own price.</div>
           {data.products.map((p) => (
