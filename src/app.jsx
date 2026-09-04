@@ -22,7 +22,6 @@ const OUTBOX_KEY = "honey-till-outbox-v1";
 const FAILED_OUTBOX_KEY = "honey-till-outbox-failed-v1";
 const LEGACY_KEY = "honey-till-v5"; // last on-device-only schema, kept for one-time import
 const MIGRATED_FLAG = "honey-till-migrated-v1";
-const SEEDED_FLAG = "honey-till-seeded-v1";
 const DISMISSED_MARKET_KEY = "honey-till-dismissed-market";
 
 const PRODUCT_TYPES = ["Honey", "Candle", "Lip balm", "Other"];
@@ -259,12 +258,6 @@ async function fetchAll() {
   return out;
 }
 
-async function seedDefaults() {
-  await supabase.from("locations").insert(DEFAULT_LOCATIONS);
-  await supabase.from("products").insert(DEFAULT_PRODUCTS);
-  await supabase.from("accounts").insert(DEFAULT_ACCOUNTS);
-}
-
 // One-time carry-over from the old per-device localStorage app: turns
 // each product's old mutable `stock` number into an opening batch, since
 // stock is never stored directly any more.
@@ -446,17 +439,17 @@ function App() {
       try {
         const server = await fetchAll();
         const allEmpty = TABLES.every((t) => server[t].length === 0);
-        if (allEmpty) {
-          const legacyRaw = localStorage.getItem(LEGACY_KEY);
-          if (legacyRaw && !localStorage.getItem(MIGRATED_FLAG)) {
-            try {
-              await migrateLegacy(JSON.parse(legacyRaw));
-              localStorage.setItem(MIGRATED_FLAG, "1");
-            } catch {}
-          } else if (!localStorage.getItem(SEEDED_FLAG)) {
-            await seedDefaults();
-            localStorage.setItem(SEEDED_FLAG, "1");
-          }
+        const legacyRaw = localStorage.getItem(LEGACY_KEY);
+        if (allEmpty && legacyRaw && !localStorage.getItem(MIGRATED_FLAG)) {
+          // One-time carry-over from this specific phone's old per-device
+          // data. Deliberately NOT paired with a "seed sample data if the
+          // shared database looks empty" fallback any more — that's what
+          // silently injected placeholder products into the shared project
+          // when a real write just hadn't landed there yet.
+          try {
+            await migrateLegacy(JSON.parse(legacyRaw));
+            localStorage.setItem(MIGRATED_FLAG, "1");
+          } catch {}
           applyServer(await fetchAll());
         } else {
           applyServer(server);
@@ -1673,7 +1666,18 @@ function App() {
       <div className="top">
         <div>
           <h1>BeeZness</h1>
-          <div className="cap">{new Date().toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}</div>
+          <div className="cap">
+            {new Date().toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}
+            {" · "}
+            <button
+              className="x"
+              style={{ fontSize: 13, padding: 0, verticalAlign: "baseline" }}
+              onClick={() => window.location.reload()}
+              aria-label="Refresh app"
+            >
+              ⟳ refresh
+            </button>
+          </div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div className="big">
