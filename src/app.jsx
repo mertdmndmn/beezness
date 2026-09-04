@@ -6,9 +6,9 @@ import ExcelJS from "exceljs";
 // ---- Supabase config -------------------------------------------------
 // Fill these in with your project's URL and anon (public) key — see
 // supabase/schema.sql for the tables + RLS this app expects.
-const SUPABASE_URL = "https://rtzdqjftxbxlrcgderbk.supabase.co";
+const SUPABASE_URL = "https://biwrbrlsgurqnckzigjg.supabase.co";
 const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ0emRxamZ0eGJ4bHJjZ2RlcmJrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgwOTQ4NTUsImV4cCI6MjEwMzY3MDg1NX0.BHUqT8yyfcERFI_4O_rx7ETMTgVCNcZ72PtLmBwpgSk";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJpd3JicmxzZ3VycW5ja3ppZ2pnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MDk2NTcsImV4cCI6MjEwNDA4NTY1N30.gopwHPQWqajYhJT9PQPZKKqAd7-qzaZEqBRT358Y8Dc";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
