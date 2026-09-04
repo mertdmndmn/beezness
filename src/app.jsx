@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
 import ExcelJS from "exceljs";
@@ -362,6 +362,7 @@ function App() {
   const [cashInput, setCashInput] = useState("");
   const [dismissedMarket, setDismissedMarket] = useState(loadDismissedMarket);
   const [outboxStatus, setOutboxStatus] = useState({ pending: 0, failed: [] });
+  const lastStockTapRef = useRef({});
   const [qty, setQty] = useState(1);
   const [unitPrice, setUnitPrice] = useState(0);
   const [priceMode, setPriceMode] = useState("full");
@@ -2082,7 +2083,15 @@ function App() {
                     key={n}
                     className="ghost tiny"
                     onClick={() => {
-                      const row = { id: uid(), pid: p.id, qty: n, ts: Date.now(), note: null };
+                      // Guards against a burst of rapid taps on the same
+                      // button creating several duplicate stock batches —
+                      // there's no visible per-tap feedback here, so an
+                      // impatient double/triple tap is easy to trigger.
+                      const tapKey = p.id + ":" + n;
+                      const now = Date.now();
+                      if (now - (lastStockTapRef.current[tapKey] || 0) < 800) return;
+                      lastStockTapRef.current[tapKey] = now;
+                      const row = { id: uid(), pid: p.id, qty: n, ts: now, note: null };
                       save({ batches: [row, ...data.batches] }, [{ table: "batches", type: "insert", id: row.id, row }]);
                     }}
                   >
