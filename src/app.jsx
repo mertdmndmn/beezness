@@ -514,7 +514,7 @@ function App() {
     let cancelled = false;
     const check = async () => {
       try {
-        const res = await fetch("app.js", { method: "HEAD", cache: "no-store" });
+        const res = await fetch(`app.js?_cb=${Date.now()}`, { method: "HEAD", cache: "no-store" });
         const tag = res.headers.get("etag") || res.headers.get("last-modified");
         if (!tag || cancelled) return;
         if (knownTag === null) knownTag = tag;

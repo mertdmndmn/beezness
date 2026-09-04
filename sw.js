@@ -1,4 +1,4 @@
-const CACHE = "beezness-v4";
+const CACHE = "beezness-v5";
 const FILES = ["./", "./index.html", "./app.js", "./icon.png", "./manifest.json"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
@@ -15,8 +15,13 @@ self.addEventListener("fetch", (e) => {
   const path = new URL(e.request.url).pathname;
   const networkFirst = NETWORK_FIRST_SUFFIXES.some((suffix) => path.endsWith(suffix));
   if (networkFirst) {
+    // A plain cache:"no-store" only stops the browser's own HTTP cache —
+    // GitHub Pages' CDN can still serve an edge-cached copy for the exact
+    // same URL. A cache-busting query param makes every request look like
+    // a URL the CDN has never seen, forcing a real trip to origin.
+    const bustUrl = e.request.url + (e.request.url.includes("?") ? "&" : "?") + "_cb=" + Date.now();
     e.respondWith(
-      fetch(new Request(e.request, { cache: "no-store" })).then((res) => {
+      fetch(bustUrl, { cache: "no-store" }).then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
         return res;
