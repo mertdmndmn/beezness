@@ -501,6 +501,38 @@ function App() {
     };
   }, []);
 
+  // ---- pick up a new deploy without waiting for a manual reopen. sw.js's
+  // own bytes never change between deploys (only app.js/index.html do,
+  // already served network-first), so a service-worker version check would
+  // never fire — instead poll app.js's own ETag/Last-Modified directly.
+  // Carts aren't persisted, so this never reloads out from under an open
+  // sale — it waits until the cart is empty again. ----
+  const [updateReady, setUpdateReady] = useState(false);
+  useEffect(() => {
+    let knownTag = null;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await fetch("app.js", { method: "HEAD", cache: "no-store" });
+        const tag = res.headers.get("etag") || res.headers.get("last-modified");
+        if (!tag || cancelled) return;
+        if (knownTag === null) knownTag = tag;
+        else if (tag !== knownTag) setUpdateReady(true);
+      } catch {}
+    };
+    check();
+    const interval = setInterval(check, 5 * 60 * 1000);
+    window.addEventListener("online", check);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      window.removeEventListener("online", check);
+    };
+  }, []);
+  useEffect(() => {
+    if (updateReady && cart.length === 0) window.location.reload();
+  }, [updateReady, cart.length]);
+
   // ---- realtime: other phones' changes land here without a refresh ----
   useEffect(() => {
     if (!session) return;
@@ -747,13 +779,29 @@ function App() {
     notifyOutbox();
   };
 
+  const retryAllFailedOps = () => {
+    const failed = loadFailedOutbox();
+    if (!failed.length) return;
+    saveFailedOutbox([]);
+    const q = loadOutbox();
+    q.push(...failed.map(({ error, code, failedAt, ...clean }) => clean));
+    saveOutbox(q);
+    notifyOutbox();
+    flushOutbox();
+  };
+
   const syncFailurePanel = outboxStatus.failed.length > 0 && (
     <div
       style={{ background: "var(--clay-soft)", border: "1px solid var(--clay)", borderRadius: 14, padding: "14px 15px", margin: "0 0 12px" }}
     >
-      <div style={{ fontSize: 14, lineHeight: 1.5, fontWeight: 600 }}>
-        ⚠ {outboxStatus.failed.length} write{outboxStatus.failed.length === 1 ? "" : "s"} rejected by the server — these won't
-        retry on their own
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ fontSize: 14, lineHeight: 1.5, fontWeight: 600 }}>
+          ⚠ {outboxStatus.failed.length} write{outboxStatus.failed.length === 1 ? "" : "s"} rejected by the server — these won't
+          retry on their own
+        </div>
+        <button className="ghost tiny" style={{ flex: "none" }} onClick={retryAllFailedOps}>
+          Retry all
+        </button>
       </div>
       {outboxStatus.failed.map((op) => (
         <div key={op.opId} style={{ marginTop: 10, fontSize: 13 }}>
