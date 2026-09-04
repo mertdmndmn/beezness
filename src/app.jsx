@@ -416,14 +416,22 @@ function App() {
 
   const applyServer = (server) => {
     const pending = loadOutbox();
-    const pendingByTable = {};
-    pending.forEach((op) => (pendingByTable[op.table] ||= new Set()).add(op.id));
+    const pendingInsertsByTable = {};
+    const pendingDeletesByTable = {};
+    pending.forEach((op) => {
+      const set = (op.type === "delete" ? pendingDeletesByTable : pendingInsertsByTable);
+      (set[op.table] ||= new Set()).add(op.id);
+    });
     setData((d) => {
       const next = {};
       TABLES.forEach((table) => {
-        const serverList = server[table];
+        // A row still on the server whose delete just hasn't synced yet
+        // must not come back to life just because a fetch beat the delete
+        // there — otherwise refreshing right after deleting something
+        // undoes it.
+        const serverList = server[table].filter((s) => !pendingDeletesByTable[table]?.has(s.id));
         const localOnly = (d[table] || []).filter(
-          (r) => pendingByTable[table]?.has(r.id) && !serverList.some((s) => s.id === r.id)
+          (r) => pendingInsertsByTable[table]?.has(r.id) && !serverList.some((s) => s.id === r.id)
         );
         next[table] = [...serverList, ...localOnly];
       });
