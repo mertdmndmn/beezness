@@ -14,8 +14,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets"];
-const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [] };
+const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes"];
+const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [] };
+// Newer than the rest of the schema: a project that hasn't run that part of
+// schema.sql yet must still load, just without sale history (and without
+// the ability to move sales, since that would be a change with no record).
+const OPTIONAL_TABLES = new Set(["sale_changes"]);
 
 const CACHE_KEY = "honey-till-cache-v1";
 const OUTBOX_KEY = "honey-till-outbox-v1";
@@ -23,6 +27,7 @@ const FAILED_OUTBOX_KEY = "honey-till-outbox-failed-v1";
 const LEGACY_KEY = "honey-till-v5"; // last on-device-only schema, kept for one-time import
 const MIGRATED_FLAG = "honey-till-migrated-v1";
 const DISMISSED_MARKET_KEY = "honey-till-dismissed-market";
+const MY_NAME_KEY = "honey-till-my-name";
 
 const PRODUCT_TYPES = ["Honey", "Candle", "Lip balm", "Other"];
 const PAYMENT_METHODS = ["TWINT", "Cash", "Bank transfer"];
@@ -55,6 +60,19 @@ function roundCashOptions(total) {
 const dayKey = (ts) => new Date(ts).toDateString();
 const timeStr = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const shortDate = (ts) => new Date(ts).toLocaleDateString([], { day: "2-digit", month: "short" });
+const itemsLabel = (lines) => lines.map((s) => `${s.qty}× ${s.name}`).join(", ");
+
+// One entry per checkout (all lines of a ticket share the account they
+// were paid to), newest first.
+function groupTickets(sales) {
+  const byTicket = {};
+  sales.forEach((s) => {
+    const t = (byTicket[s.ticket] ||= { ticket: s.ticket, ts: s.ts, account: s.account, accountId: s.accountId, method: s.method, note: s.note, market: s.market, lines: [], amount: 0 });
+    t.lines.push(s);
+    t.amount += s.qty * s.price;
+  });
+  return Object.values(byTicket).sort((a, b) => b.ts - a.ts);
+}
 const isoDate = (d) => {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -139,6 +157,23 @@ function saveDismissedMarket(id) {
     localStorage.setItem(DISMISSED_MARKET_KEY, id);
   } catch {}
 }
+function clearDismissedMarket() {
+  try {
+    localStorage.removeItem(DISMISSED_MARKET_KEY);
+  } catch {}
+}
+function loadMyName() {
+  try {
+    return localStorage.getItem(MY_NAME_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+function saveMyName(name) {
+  try {
+    localStorage.setItem(MY_NAME_KEY, name);
+  } catch {}
+}
 function saveCache(data) {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(data));
@@ -190,7 +225,13 @@ function enqueueOps(ops) {
 }
 
 async function applyOp(op) {
-  if (op.type === "insert") {
+  if (op.type === "append") {
+    // Plain insert for append-only tables (no update policy, so upsert is
+    // refused). A replay after a lost response hits the same client id —
+    // that duplicate means it already landed.
+    const { error } = await supabase.from(op.table).insert(op.row);
+    if (error && error.code !== "23505") throw error;
+  } else if (op.type === "insert") {
     const { error } = await supabase.from(op.table).upsert(op.row);
     if (error) throw error;
   } else if (op.type === "update") {
@@ -250,11 +291,15 @@ function removeById(list, id) {
 
 async function fetchAll() {
   const results = await Promise.all(TABLES.map((t) => supabase.from(t).select("*")));
-  results.forEach((r) => {
-    if (r.error) throw r.error;
+  const out = { missing: [] };
+  TABLES.forEach((t, i) => {
+    const r = results[i];
+    if (r.error) {
+      if (!OPTIONAL_TABLES.has(t)) throw r.error;
+      out.missing.push(t);
+    }
+    out[t] = r.data || [];
   });
-  const out = {};
-  TABLES.forEach((t, i) => (out[t] = results[i].data || []));
   return out;
 }
 
@@ -375,7 +420,14 @@ function App() {
   const [payNote, setPayNote] = useState("");
   const [marketDraft, setMarketDraft] = useState(null);
   const [summaryMarket, setSummaryMarket] = useState(null);
-  const [confirming, setConfirming] = useState(null); // "today" | "all" | "reset" | null
+  const [confirming, setConfirming] = useState(null); // "today" | "all" | "reset" | "acct:<id>" | null
+  // Whether sale_changes exists on the server: null until a fetch confirms
+  // either way (e.g. offline at boot). Moving a sale needs true.
+  const [historyReady, setHistoryReady] = useState(null);
+  const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
+  // Pay screen, phone not in market mode while a market is open: did the
+  // seller say this sale belongs to it? null = not touched, use the default.
+  const [tagMarket, setTagMarket] = useState(null);
 
   // ---- auth: silent, automatic, no sign-in screen. Everyone who loads the
   // site gets an anonymous session (still "authenticated" for RLS purposes),
@@ -463,10 +515,28 @@ function App() {
         } else {
           applyServer(server);
         }
+        setHistoryReady(!server.missing.includes("sale_changes"));
       } catch {
         // offline at boot — keep showing whatever the cache already has
       }
     })();
+  }, [Boolean(session)]);
+
+  // ---- coming back to the app (unlock, switching back from TWINT) pulls a
+  // fresh copy, so a market started on another phone a minute ago is here
+  // before the next sale — not only once live sync happens to deliver it ----
+  useEffect(() => {
+    if (!session) return;
+    const onVisible = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const server = await fetchAll();
+        applyServer(server);
+        setHistoryReady(!server.missing.includes("sale_changes"));
+      } catch {}
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [Boolean(session)]);
 
   // ---- outbox retry loop ----
@@ -535,11 +605,12 @@ function App() {
     if (updateReady && cart.length === 0) window.location.reload();
   }, [updateReady, cart.length]);
 
-  // ---- realtime: other phones' changes land here without a refresh ----
-  useEffect(() => {
-    if (!session) return;
-    const channel = supabase.channel("honey-till-sync");
-    TABLES.forEach((table) => {
+  // ---- realtime: other phones' changes land here without a refresh.
+  // Optional tables get their own channel, opened only once the table is
+  // known to exist, so a project without them can't break the main one. ----
+  const subscribeTables = (name, tables) => {
+    const channel = supabase.channel(name);
+    tables.forEach((table) => {
       channel.on("postgres_changes", { event: "*", schema: "public", table }, (payload) => {
         setData((d) => {
           const list = d[table];
@@ -551,6 +622,19 @@ function App() {
         });
       });
     });
+    return channel;
+  };
+  useEffect(() => {
+    if (!session || historyReady !== true) return;
+    const channel = subscribeTables("honey-till-sync-optional", [...OPTIONAL_TABLES]).subscribe();
+    return () => supabase.removeChannel(channel);
+  }, [Boolean(session), historyReady]);
+  useEffect(() => {
+    if (!session) return;
+    const channel = subscribeTables(
+      "honey-till-sync",
+      TABLES.filter((t) => !OPTIONAL_TABLES.has(t))
+    );
     channel.subscribe((status) => {
       if (status === "SUBSCRIBED") flushOutbox();
     });
@@ -584,6 +668,17 @@ function App() {
   const openMarket = data.markets.find((m) => !m.endedAt) || null;
   const activeMarket = openMarket && openMarket.id !== dismissedMarket ? openMarket : null;
   const homeTab = activeMarket ? "market" : "sell";
+  // A market is running but this phone isn't in it (left it, or it only
+  // just arrived). Sales here get asked whether they belong to it, and
+  // default to yes when the phone is set to the market's place.
+  const outsideMarket = openMarket && !activeMarket ? openMarket : null;
+  const tagToMarket = outsideMarket ? (tagMarket ?? outsideMarket.locId === activeLoc) : false;
+  const saleMarket = activeMarket || (tagToMarket ? outsideMarket : null);
+  const rejoinMarket = () => {
+    clearDismissedMarket();
+    setDismissedMarket(null);
+    setTab("market");
+  };
   const contextLocId = activeMarket ? activeMarket.locId : activeLoc;
   const effectivePrice = (product) => {
     if (activeMarket) {
@@ -679,17 +774,44 @@ function App() {
     };
   }, [data.sales, reportDay, reportLoc]);
 
+  // Every sale lands in exactly one bucket — a person, the common account,
+  // or unassigned (its account can't be found, e.g. it was removed in
+  // Admin) — so taken === people + common + unassigned and nothing can
+  // quietly fall out of the settlement.
   const settleInfo = useMemo(() => {
-    const people = data.accounts.filter((a) => !a.common);
+    const byId = Object.fromEntries(data.accounts.map((a) => [a.id, a]));
+    const resolve = (s) => (s.accountId ? byId[s.accountId] : data.accounts.find((a) => a.name === s.account)) || null;
     const weekAgo = Date.now() - 168 * 3600 * 1000;
-    const rows = people.map((a) => {
-      const theirSales = data.sales.filter((s) => (s.accountId ? s.accountId === a.id : s.account === a.name));
-      const collected = theirSales.reduce((s, x) => s + x.qty * x.price, 0);
-      const week = theirSales.filter((s) => s.ts >= weekAgo).reduce((s, x) => s + x.qty * x.price, 0);
-      const paid = data.transfers.filter((t) => t.accountId === a.id).reduce((s, x) => s + x.amount, 0);
-      return { ...a, collected, week, paid, due: round2(collected - paid) };
+    const sum = (list) => list.reduce((s, x) => s + x.qty * x.price, 0);
+    const salesBy = {};
+    const commonSales = [];
+    const unassignedSales = [];
+    data.sales.forEach((s) => {
+      const a = resolve(s);
+      if (!a) unassignedSales.push(s);
+      else if (a.common) commonSales.push(s);
+      else (salesBy[a.id] ||= []).push(s);
     });
-    return { rows, outstanding: rows.reduce((s, x) => s + x.due, 0) };
+    const rows = data.accounts
+      .filter((a) => !a.common)
+      .map((a) => {
+        const theirSales = salesBy[a.id] || [];
+        const collected = sum(theirSales);
+        const week = sum(theirSales.filter((s) => s.ts >= weekAgo));
+        const paid = data.transfers.filter((t) => t.accountId === a.id).reduce((s, x) => s + x.amount, 0);
+        return { ...a, collected, week, paid, due: round2(collected - paid) };
+      });
+    return {
+      rows,
+      outstanding: rows.reduce((s, x) => s + x.due, 0),
+      taken: sum(data.sales),
+      heldByPeople: rows.reduce((s, x) => s + x.collected, 0),
+      commonAccount: data.accounts.find((a) => a.common) || null,
+      common: sum(commonSales),
+      commonTickets: groupTickets(commonSales),
+      unassigned: sum(unassignedSales),
+      unassignedTickets: groupTickets(unassignedSales),
+    };
   }, [data.sales, data.transfers, data.accounts]);
 
   // ---- actions ----
@@ -734,8 +856,8 @@ function App() {
       accountId: account.id,
       account: account.name,
       method: account.method,
-      marketId: activeMarket ? activeMarket.id : null,
-      market: activeMarket ? activeMarket.name : null,
+      marketId: saleMarket ? saleMarket.id : null,
+      market: saleMarket ? saleMarket.name : null,
       cashReceived: cashInfo ? cashInfo.received : null,
       cashChange: cashInfo ? cashInfo.change : null,
     }));
@@ -745,12 +867,71 @@ function App() {
     );
     setReceipt({ total, account: account.name, method: account.method, lines: cart, note: note.trim() });
     setCart([]);
+    setTagMarket(null);
     setNote("");
     setTab("done");
     setTimeout(() => {
       setTab((cur) => (cur === "done" ? homeTab : cur));
       setToast({ msg: `CHF ${money(total)} → ${account.name}`, undo: ticket });
     }, 1600);
+  };
+
+  // Money between family: a move never overwrites silently. The history
+  // row is queued ahead of the sale updates (the outbox replays in order)
+  // and carries who, when, and what the sale said before.
+  const moveTicket = (ticket, toAccount, changedBy, reason) => {
+    const rows = data.sales.filter((s) => s.ticket === ticket);
+    const by = changedBy.trim();
+    if (!rows.length || !toAccount || !by || historyReady !== true) return;
+    const first = rows[0];
+    const change = {
+      id: uid(),
+      ts: Date.now(),
+      ticket,
+      saleIds: rows.map((r) => r.id),
+      items: itemsLabel(rows),
+      amount: round2(rows.reduce((s, x) => s + x.qty * x.price, 0)),
+      fromAccountId: first.accountId || null,
+      fromAccount: first.account || null,
+      fromMethod: first.method || null,
+      toAccountId: toAccount.id,
+      toAccount: toAccount.name,
+      toMethod: toAccount.method,
+      changedBy: by,
+      authUserId: session?.user?.id || null,
+      note: reason.trim() || null,
+    };
+    const patch = { accountId: toAccount.id, account: toAccount.name, method: toAccount.method };
+    save(
+      {
+        sales: data.sales.map((s) => (s.ticket === ticket ? { ...s, ...patch } : s)),
+        sale_changes: [change, ...data.sale_changes],
+      },
+      [
+        { table: "sale_changes", type: "append", id: change.id, row: change },
+        ...rows.map((r) => ({ table: "sales", type: "update", id: r.id, row: patch })),
+      ]
+    );
+    saveMyName(by);
+    setMoving(null);
+    setToast({ msg: `CHF ${money(change.amount)} moved to ${toAccount.name}.` });
+  };
+
+  // Same matching rule as settleInfo: by id, or by name for rows that
+  // predate accountId.
+  const accountUsage = (a) => {
+    const sales = data.sales.filter((s) => (s.accountId ? s.accountId === a.id : s.account === a.name));
+    const transfers = data.transfers.filter((t) => t.accountId === a.id);
+    return {
+      sales: sales.length,
+      amount: sales.reduce((s, x) => s + x.qty * x.price, 0),
+      transfers: transfers.length,
+      paid: transfers.reduce((s, x) => s + x.amount, 0),
+    };
+  };
+  const removeAccount = (a) => {
+    save({ accounts: data.accounts.filter((x) => x.id !== a.id) }, [{ table: "accounts", type: "delete", id: a.id }]);
+    setConfirming(null);
   };
 
   const deleteTicket = (ticket) => {
@@ -1007,6 +1188,30 @@ function App() {
     styleTotalRow(outstandingRow);
 
     settleSheet.addRow([]);
+    styleSectionRow(settleSheet.addRow(["Every franc taken, all time"]));
+    [
+      ["Held by people", settleInfo.heldByPeople],
+      ["Paid straight to common", settleInfo.common],
+      ["Unassigned", settleInfo.unassigned],
+    ].forEach(([label, v]) => (settleSheet.addRow([label, "", round2(v)]).getCell(3).numFmt = XLSX_MONEY_FMT));
+    const takenRow = settleSheet.addRow(["Taken", "", round2(settleInfo.taken)]);
+    takenRow.getCell(3).numFmt = XLSX_MONEY_FMT;
+    styleTotalRow(takenRow);
+
+    if (data.sale_changes.length) {
+      settleSheet.addRow([]);
+      styleSectionRow(settleSheet.addRow(["Changes to sales"]));
+      styleHeaderRow(settleSheet.addRow(["Date", "Changed by", "Amount CHF", "From", "To", "Items", "Note"]));
+      [...data.sale_changes]
+        .sort((a, b) => a.ts - b.ts)
+        .forEach((c) => {
+          settleSheet
+            .addRow([new Date(c.ts).toLocaleString(), c.changedBy, round2(c.amount), c.fromAccount || "", c.toAccount, c.items || "", c.note || ""])
+            .getCell(3).numFmt = XLSX_MONEY_FMT;
+        });
+    }
+
+    settleSheet.addRow([]);
     styleSectionRow(settleSheet.addRow(["Transfers"]));
     styleHeaderRow(settleSheet.addRow(["Date", "Person", "Amount CHF", "Note"]));
     data.transfers.forEach((t) => {
@@ -1053,6 +1258,13 @@ function App() {
     );
     lines.push("", "Person,Collected CHF,Paid CHF,Owes CHF");
     settleInfo.rows.forEach((a) => lines.push([a.name, money(a.collected), money(a.paid), money(a.due)].join(",")));
+    lines.push(
+      "",
+      `Held by people,${money(settleInfo.heldByPeople)}`,
+      `Paid straight to common,${money(settleInfo.common)}`,
+      `Unassigned,${money(settleInfo.unassigned)}`,
+      `Taken,${money(settleInfo.taken)}`
+    );
     try {
       await navigator.clipboard.writeText(lines.join("\n"));
       setToast({ msg: "Copied — paste into a sheet." });
@@ -1060,6 +1272,85 @@ function App() {
       setToast({ msg: "Copy blocked by the browser." });
     }
   };
+
+  const moveForm = (t) => (
+    <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "12px 13px", marginTop: 8 }}>
+      {historyReady === true ? (
+        <>
+          <div className="cap mb6">Move to</div>
+          <select value={moving.toId} onChange={(e) => setMoving({ ...moving, toId: e.target.value })} style={{ width: "100%" }}>
+            <option value="">Choose an account…</option>
+            {data.accounts
+              .filter((a) => a.id !== t.accountId)
+              .map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} · {a.method}
+                  {a.common ? " · common" : ""}
+                </option>
+              ))}
+          </select>
+          <input
+            value={moving.by}
+            onChange={(e) => setMoving({ ...moving, by: e.target.value })}
+            placeholder="Your name (required)"
+            style={{ width: "100%", marginTop: 8, fontFamily: "'Barlow',sans-serif" }}
+          />
+          <input
+            value={moving.note}
+            onChange={(e) => setMoving({ ...moving, note: e.target.value })}
+            placeholder="Why (optional)"
+            style={{ width: "100%", marginTop: 8, fontFamily: "'Barlow',sans-serif" }}
+          />
+          <div className="s" style={{ marginTop: 8 }}>
+            Kept in the change history below with your name and the time. What it said before stays on record.
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 14, lineHeight: 1.5 }}>
+          {historyReady === false
+            ? "Sale history isn't set up on the server yet, so moving sales is switched off. Run the sale_changes part of supabase/schema.sql in Supabase, then reopen the app."
+            : "Can't reach the server to check that sale history is on, so moving is switched off until it can. Nothing changes without a record."}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button className="ghost" onClick={() => setMoving(null)}>
+          Cancel
+        </button>
+        {historyReady === true && (
+          <button
+            className="ghost solid"
+            disabled={!moving.toId || !moving.by.trim()}
+            onClick={() => moveTicket(t.ticket, data.accounts.find((a) => a.id === moving.toId), moving.by, moving.note)}
+          >
+            Move CHF {money(t.amount)}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  const ticketRow = (t) => (
+    <div key={t.ticket} style={{ borderBottom: "1px solid var(--comb)", padding: "4px 0 10px" }}>
+      <div className="row" style={{ borderBottom: 0, paddingBottom: 0 }}>
+        <div className="grow">
+          <div className="t">{itemsLabel(t.lines)}</div>
+          <div className="s">
+            {shortDate(t.ts)} {timeStr(t.ts)} · paid to {t.account || "—"}
+            {t.market ? ` · ${t.market}` : ""}
+            {t.note ? ` · ${t.note}` : ""}
+          </div>
+        </div>
+        <div className="v">{money(t.amount)}</div>
+      </div>
+      {moving && moving.ticket === t.ticket ? (
+        moveForm(t)
+      ) : (
+        <button className="ghost tiny mt8" onClick={() => setMoving({ ticket: t.ticket, toId: "", by: loadMyName(), note: "" })}>
+          Move to…
+        </button>
+      )}
+    </div>
+  );
 
   if (!authReady) return <div className="hl"><div className="empty">Opening BeeZness…</div></div>;
   if (!session) {
@@ -1201,6 +1492,21 @@ function App() {
             <option key={n} value={n} />
           ))}
         </datalist>
+        {outsideMarket && (
+          <div style={{ background: "var(--honey-soft)", border: "1px solid var(--honey)", borderRadius: 14, padding: "12px 13px", marginTop: 16 }}>
+            <div style={{ fontSize: 14, lineHeight: 1.5, fontWeight: 600 }}>
+              {outsideMarket.name} is running at {locationName(outsideMarket.locId)}. Is this sale part of it?
+            </div>
+            <div className="seg" style={{ margin: "10px 0 0" }}>
+              <button data-on={tagToMarket ? "1" : "0"} onClick={() => setTagMarket(true)}>
+                Yes, count it in {outsideMarket.name}
+              </button>
+              <button data-on={tagToMarket ? "0" : "1"} onClick={() => setTagMarket(false)}>
+                No
+              </button>
+            </div>
+          </div>
+        )}
         <div className="cap mt16 mb6">Which account is it going to?</div>
         {data.accounts.length === 0 && <div className="empty">No accounts yet. Add them in Admin first.</div>}
         {data.accounts.map((a) => (
@@ -1701,6 +2007,20 @@ function App() {
 
       {syncFailurePanel}
 
+      {outsideMarket && (
+        <div style={{ background: "var(--honey-soft)", border: "1px solid var(--honey)", borderRadius: 14, padding: "14px 15px", margin: "0 0 12px" }}>
+          <div style={{ fontSize: 15, lineHeight: 1.45, fontWeight: 600 }}>
+            {outsideMarket.name} is running at {locationName(outsideMarket.locId)}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--soft)", marginTop: 2 }}>
+            Started {timeStr(outsideMarket.startedAt)} · selling here uses normal prices
+          </div>
+          <button className="ghost solid wide mt8" onClick={rejoinMarket}>
+            Sell at {outsideMarket.name}
+          </button>
+        </div>
+      )}
+
       <div className="seg">
         {data.locations.map((l) => (
           <button
@@ -1930,6 +2250,41 @@ function App() {
           <div className="empty pt0">
             Every sale sticks to the person whose account took the money. Pay in, tap the amount, and the balance clears.
           </div>
+          <div className="settle">
+            <div className="cap mb6">Every franc taken, all time</div>
+            {[
+              ["Held by people", settleInfo.heldByPeople],
+              ["Paid straight to common", settleInfo.common],
+              ...(settleInfo.unassigned ? [["Unassigned", settleInfo.unassigned]] : []),
+            ].map(([label, v]) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0", color: label === "Unassigned" ? "var(--clay)" : undefined }}>
+                <span>{label}</span>
+                <span className="num">{money(v)}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, fontWeight: 600, padding: "6px 0 0", marginTop: 4, borderTop: "1px solid var(--comb)" }}>
+              <span>Taken</span>
+              <span className="num">{money(settleInfo.taken)}</span>
+            </div>
+          </div>
+
+          {settleInfo.unassignedTickets.length > 0 && (
+            <div className="settle" style={{ borderColor: "var(--clay)", background: "var(--clay-soft)" }}>
+              <div className="settle-head">
+                <div className="grow">
+                  <div className="t" style={{ fontSize: 17, fontWeight: 600 }}>
+                    Unassigned
+                  </div>
+                  <div className="s">The account these were paid to no longer exists. Attach each one to whoever holds the money.</div>
+                </div>
+                <div className="num" style={{ fontSize: 20, fontWeight: 600, color: "var(--clay)" }}>
+                  {money(settleInfo.unassigned)}
+                </div>
+              </div>
+              {settleInfo.unassignedTickets.map(ticketRow)}
+            </div>
+          )}
+
           {settleInfo.rows.length === 0 && (
             <div className="empty">Mark one account as the common one in Admin, and the rest become people who collect for it.</div>
           )}
@@ -1996,6 +2351,54 @@ function App() {
               )}
             </div>
           ))}
+
+          <div className="settle">
+            <div className="settle-head">
+              <div className="grow">
+                <div className="t" style={{ fontSize: 17, fontWeight: 600 }}>
+                  Paid straight to common
+                </div>
+                <div className="s">
+                  {settleInfo.commonAccount
+                    ? `${settleInfo.commonAccount.name} · ${settleInfo.commonAccount.method} · already where it belongs, owed by nobody`
+                    : "No account is marked common yet — pick one in Admin"}
+                </div>
+              </div>
+              <div className="num" style={{ fontSize: 20, fontWeight: 600 }}>
+                {money(settleInfo.common)}
+              </div>
+            </div>
+            {settleInfo.commonTickets.length === 0 ? (
+              <div className="s" style={{ marginTop: 5 }}>
+                Nothing yet. Sales paid directly into the common account show up here.
+              </div>
+            ) : (
+              settleInfo.commonTickets.map(ticketRow)
+            )}
+          </div>
+
+          {data.sale_changes.length > 0 && (
+            <>
+              <hr className="rule" />
+              <div className="cap">Changes to sales</div>
+              {[...data.sale_changes]
+                .sort((a, b) => b.ts - a.ts)
+                .map((c) => (
+                  <div className="row" key={c.id}>
+                    <div className="grow">
+                      <div className="t">
+                        {c.changedBy} moved {c.items} from {c.fromAccount || "an unknown account"} to {c.toAccount}
+                      </div>
+                      <div className="s">
+                        {shortDate(c.ts)} {timeStr(c.ts)}
+                        {c.note ? ` · ${c.note}` : ""}
+                      </div>
+                    </div>
+                    <div className="v">{money(c.amount)}</div>
+                  </div>
+                ))}
+            </>
+          )}
 
           {data.transfers.length > 0 && (
             <>
@@ -2205,12 +2608,40 @@ function App() {
                 </select>
                 <button
                   className="x"
-                  onClick={() => save({ accounts: data.accounts.filter((x) => x.id !== a.id) }, [{ table: "accounts", type: "delete", id: a.id }])}
+                  onClick={() => {
+                    const key = `acct:${a.id}`;
+                    if (accountUsage(a).sales || accountUsage(a).transfers) setConfirming(confirming === key ? null : key);
+                    else removeAccount(a);
+                  }}
                   aria-label="Remove account"
                 >
                   ×
                 </button>
               </div>
+              {confirming === `acct:${a.id}` &&
+                (() => {
+                  const u = accountUsage(a);
+                  return (
+                    <div
+                      style={{ background: "var(--clay-soft)", border: "1px solid var(--clay)", borderRadius: 14, padding: "14px 15px", marginTop: 8 }}
+                    >
+                      <div style={{ fontSize: 14, lineHeight: 1.5 }}>
+                        {a.name} has {u.sales} sale{u.sales === 1 ? "" : "s"} (CHF {money(u.amount)})
+                        {u.transfers ? ` and ${u.transfers} payment${u.transfers === 1 ? "" : "s"} into common (CHF ${money(u.paid)})` : ""}.
+                        Removing the account moves those sales to Unassigned on the Who owes tab until they're attached to someone else.
+                        {u.transfers ? " Its payments into common will no longer count towards anyone." : ""}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                        <button className="ghost" onClick={() => setConfirming(null)}>
+                          Cancel
+                        </button>
+                        <button className="ghost danger solid" onClick={() => removeAccount(a)}>
+                          Remove {a.name}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
               <button
                 className="chip mt8"
                 data-on={a.common ? "1" : "0"}

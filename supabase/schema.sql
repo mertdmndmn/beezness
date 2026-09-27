@@ -91,6 +91,30 @@ alter table sales add column if not exists market text;
 alter table sales add column if not exists "cashReceived" numeric;
 alter table sales add column if not exists "cashChange" numeric;
 
+-- Every time a sale is moved to a different account (e.g. an unassigned
+-- sale attached to a person, or a sale booked to the wrong TWINT), one row
+-- lands here: who did it, when, and what the sale said before. Append-only:
+-- there is deliberately no update or delete policy below, so history can't
+-- be rewritten from the app. The item/amount summary is copied in so the
+-- record still reads correctly after the sales themselves are cleared.
+create table if not exists sale_changes (
+  id text primary key,
+  ts bigint not null,
+  ticket text not null,
+  "saleIds" jsonb not null default '[]'::jsonb,
+  items text,
+  amount numeric not null,
+  "fromAccountId" text,
+  "fromAccount" text,
+  "fromMethod" text,
+  "toAccountId" text not null,
+  "toAccount" text not null,
+  "toMethod" text,
+  "changedBy" text not null,
+  "authUserId" text,
+  note text
+);
+
 alter table locations enable row level security;
 alter table products  enable row level security;
 alter table accounts  enable row level security;
@@ -98,6 +122,7 @@ alter table batches   enable row level security;
 alter table sales     enable row level security;
 alter table transfers enable row level security;
 alter table markets   enable row level security;
+alter table sale_changes enable row level security;
 
 -- Single shared workspace: any signed-in user may read/write everything.
 create policy "authenticated full access" on locations for all
@@ -114,6 +139,11 @@ create policy "authenticated full access" on transfers for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "authenticated full access" on markets for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+-- sale_changes: read and append only. No update/delete policy on purpose.
+create policy "authenticated read" on sale_changes for select
+  using (auth.role() = 'authenticated');
+create policy "authenticated append" on sale_changes for insert
+  with check (auth.role() = 'authenticated');
 
 -- Realtime: on most Supabase projects the "supabase_realtime" publication
 -- is created FOR ALL TABLES, so every table above is already broadcasting
