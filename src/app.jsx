@@ -109,7 +109,7 @@ function styleTotalRow(row) {
   });
 }
 
-// Alphabetical by name; numeric so "250g" sorts before "1000g". Letter sizes
+// By type, then alphabetical by name; numeric so "250g" sorts before "1000g". Letter sizes
 // ("Candle XS", "Candle M") sort small to big rather than alphabetically.
 const LETTER_SIZES = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"];
 const sizeKey = (name) =>
@@ -117,7 +117,14 @@ const sizeKey = (name) =>
     // "1 L" is a volume, not a size.
     /\d\s?$/.test(str.slice(0, i)) ? m : String(LETTER_SIZES.indexOf(m) + 1)
   );
-const byName = (a, b) => sizeKey(a.name).localeCompare(sizeKey(b.name), undefined, { numeric: true, sensitivity: "base" });
+// Type comes first, in PRODUCT_TYPES order, so honey always leads.
+const typeRank = (t) => {
+  const i = PRODUCT_TYPES.indexOf(t);
+  return i === -1 ? PRODUCT_TYPES.length : i;
+};
+const byName = (a, b) =>
+  typeRank(a.type) - typeRank(b.type) ||
+  sizeKey(a.name).localeCompare(sizeKey(b.name), undefined, { numeric: true, sensitivity: "base" });
 
 // Products that share a name apart from their size ("Castagno 250 g",
 // "Castagno 500 g") are one family. Each family with several sizes gets its
