@@ -111,6 +111,32 @@ function styleTotalRow(row) {
 // Alphabetical by name; numeric so "250g" sorts before "1000g".
 const byName = (a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" });
 
+// Products that share a name apart from their size ("Castagno 250 g",
+// "Castagno 500 g") are one family. Each family with several sizes gets its
+// own row of tiles; one-off products share rows between them. Expects the
+// list already sorted by name.
+const familyOf = (name) =>
+  (name || "")
+    .replace(/\d+([.,]\d+)?\s*(kg|g|gr|ml|cl|l|pcs|pz|stk)?\b\.?/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+function tileRows(products) {
+  const families = [];
+  for (const p of products) {
+    const last = families[families.length - 1];
+    if (last && familyOf(last[0].name) === familyOf(p.name)) last.push(p);
+    else families.push([p]);
+  }
+  const rows = [];
+  for (const fam of families) {
+    const last = rows[rows.length - 1];
+    if (fam.length === 1 && last && last.loose) last.push(fam[0]);
+    else rows.push(Object.assign([...fam], { loose: fam.length === 1 }));
+  }
+  return rows;
+}
+
 function seedProduct(name, type, priceTi, priceLu) {
   return { id: uid(), name, type, price: { "loc-ti": priceTi, "loc-lu": priceLu } };
 }
@@ -1877,21 +1903,23 @@ function App() {
         {marketProducts.length === 0 && (
           <div className="empty">No products picked for today — use "Edit today's table" below.</div>
         )}
-        <div className="tiles">
-          {marketProducts.map((p) => {
-            const available = stockOf(p.id) - inCartQty(p.id);
-            return (
-              <button key={p.id} className="tile" disabled={available <= 0} onClick={() => pickProduct(p)}>
-                {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
-                <b>{p.name}</b>
-                <div className="pr">CHF {money(effectivePrice(p))}</div>
-                <div className="st" data-low={available <= 3 ? "1" : "0"}>
-                  {available > 0 ? `${available} left` : "sold out"}
-                </div>
-              </button>
-            );
-          })}
-        </div>
+        {tileRows(marketProducts).map((row) => (
+          <div className="tiles mb10" key={row[0].id}>
+            {row.map((p) => {
+              const available = stockOf(p.id) - inCartQty(p.id);
+              return (
+                <button key={p.id} className="tile" disabled={available <= 0} onClick={() => pickProduct(p)}>
+                  {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
+                  <b>{p.name}</b>
+                  <div className="pr">CHF {money(effectivePrice(p))}</div>
+                  <div className="st" data-low={available <= 3 ? "1" : "0"}>
+                    {available > 0 ? `${available} left` : "sold out"}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ))}
 
         {cart.length > 0 && (
           <div className="bag">
@@ -2076,21 +2104,23 @@ function App() {
               <div className="cap" style={{ marginBottom: 9 }}>
                 {type}
               </div>
-              <div className="tiles">
-                {byType[type].map((p) => {
-                  const available = stockOf(p.id) - inCartQty(p.id);
-                  return (
-                    <button key={p.id} className="tile" disabled={available <= 0} onClick={() => pickProduct(p)}>
-                      {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
-                      <b>{p.name}</b>
-                      <div className="pr">CHF {money(priceOf(p))}</div>
-                      <div className="st" data-low={available <= 3 ? "1" : "0"}>
-                        {available > 0 ? `${available} left` : "sold out"}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+              {tileRows(byType[type]).map((row) => (
+                <div className="tiles mb10" key={row[0].id}>
+                  {row.map((p) => {
+                    const available = stockOf(p.id) - inCartQty(p.id);
+                    return (
+                      <button key={p.id} className="tile" disabled={available <= 0} onClick={() => pickProduct(p)}>
+                        {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
+                        <b>{p.name}</b>
+                        <div className="pr">CHF {money(priceOf(p))}</div>
+                        <div className="st" data-low={available <= 3 ? "1" : "0"}>
+                          {available > 0 ? `${available} left` : "sold out"}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           ))}
 
