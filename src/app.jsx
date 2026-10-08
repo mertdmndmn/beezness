@@ -799,11 +799,12 @@ function App() {
   };
 
   const report = useMemo(() => {
-    // reportDay holds either a dayKey or "market:<id>".
+    // reportDay holds a dayKey, "market:<id>", or "all" for every sale ever.
+    const allTime = reportDay === "all";
     const marketId = reportDay.startsWith("market:") ? reportDay.slice(7) : null;
     const market = marketId ? data.markets.find((m) => m.id === marketId) || { id: marketId, name: "Market" } : null;
     const rows = data.sales
-      .filter((s) => (market ? s.marketId === market.id : dayKey(s.ts) === reportDay) && (reportLoc === "all" || s.locId === reportLoc))
+      .filter((s) => (allTime || (market ? s.marketId === market.id : dayKey(s.ts) === reportDay)) && (reportLoc === "all" || s.locId === reportLoc))
       .sort((a, b) => a.ts - b.ts);
     const byDay = {};
     const byAcct = {};
@@ -829,6 +830,9 @@ function App() {
     return {
       rows,
       market,
+      allTime,
+      // Sales spread over more than one day get a date next to their time.
+      multiDay: allTime || !!market,
       byDay,
       total: rows.reduce((s, x) => s + x.qty * x.price, 0),
       units: rows.reduce((s, x) => s + x.qty, 0),
@@ -1187,12 +1191,16 @@ function App() {
   };
 
   const downloadZReport = async () => {
-    const market = report.market;
-    // A market report is "as of now" for stock and settlement; a day report
-    // is as of that day.
-    const day = market ? new Date() : new Date(reportDay);
-    const when = market ? `${market.name}${market.startedAt ? ` (${marketSpan(market)})` : ""}` : day.toLocaleDateString();
-    const saleTime = (ts) => (market ? `${shortDate(ts)} ${timeStr(ts)}` : timeStr(ts));
+    const { market, allTime, multiDay } = report;
+    // A market or all-time report is "as of now" for stock and settlement;
+    // a day report is as of that day.
+    const day = multiDay ? new Date() : new Date(reportDay);
+    const when = allTime
+      ? `All time, as of ${day.toLocaleDateString()}`
+      : market
+      ? `${market.name}${market.startedAt ? ` (${marketSpan(market)})` : ""}`
+      : day.toLocaleDateString();
+    const saleTime = (ts) => (multiDay ? `${shortDate(ts)} ${timeStr(ts)}` : timeStr(ts));
     const locs = data.locations;
     const wb = new ExcelJS.Workbook();
     wb.creator = "BeeZness";
@@ -1200,7 +1208,7 @@ function App() {
 
     // ---- Sales ----
     const salesSheet = wb.addWorksheet("Sales", { views: [{ state: "frozen", ySplit: 3 }] });
-    salesSheet.columns = [market ? 14 : 8, 11, 11, 12, 24, 10, 6, 10, 12, 14, 10, 15, 11, 24].map((width) => ({ width }));
+    salesSheet.columns = [multiDay ? 14 : 8, 11, 11, 12, 24, 10, 6, 10, 12, 14, 10, 15, 11, 24].map((width) => ({ width }));
 
     styleTitleRow(salesSheet.addRow(["Z report", when, reportLoc === "all" ? "All places" : locationName(reportLoc)]));
     salesSheet.addRow([]);
@@ -1245,7 +1253,7 @@ function App() {
         salesSheet.addRow([k, round2(v)]).getCell(2).numFmt = XLSX_MONEY_FMT;
       });
     };
-    if (market) addMoneySection("Per day", Object.entries(report.byDay));
+    if (multiDay) addMoneySection("Per day", Object.entries(report.byDay));
     addMoneySection("Per account", Object.entries(report.byAcct));
     addMoneySection("Per place", Object.entries(report.byLoc));
     addMoneySection("Per market", Object.entries(report.byMarket));
@@ -1337,7 +1345,9 @@ function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = market ? `Z-report-${market.name.replace(/[^\w-]+/g, "-")}.xlsx` : `Z-report-${isoDate(day)}.xlsx`;
+      a.download = allTime
+        ? `Z-report-all-time-${isoDate(day)}.xlsx`
+        : market ? `Z-report-${market.name.replace(/[^\w-]+/g, "-")}.xlsx` : `Z-report-${isoDate(day)}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1353,7 +1363,7 @@ function App() {
     report.rows.forEach((s) =>
       lines.push(
         [
-          report.market ? `${shortDate(s.ts)} ${timeStr(s.ts)}` : timeStr(s.ts),
+          report.multiDay ? `${shortDate(s.ts)} ${timeStr(s.ts)}` : timeStr(s.ts),
           s.ticket,
           s.location,
           s.market || "",
@@ -2269,6 +2279,7 @@ function App() {
             <div>
               <div className="cap mb6">Day or market</div>
               <select value={reportDay} onChange={(e) => setReportDay(e.target.value)}>
+                <option value="all">All time</option>
                 <optgroup label="Days">
                   {[...new Set([dayKey(Date.now()), ...saleDays])].map((d) => (
                     <option key={d} value={d}>
@@ -2325,13 +2336,25 @@ function App() {
 
           <hr className="rule" />
           <div className="cap">Per account</div>
-          {Object.keys(report.byAcct).length === 0 && <div className="empty">{report.market ? "Nothing sold at this market." : "Nothing on this day."}</div>}
+          {Object.keys(report.byAcct).length === 0 && <div className="empty">{report.allTime ? "Nothing sold yet." : report.market ? "Nothing sold at this market." : "Nothing on this day."}</div>}
           {Object.entries(report.byAcct).map(([k, v]) => (
             <div className="row" key={k}>
               <div className="grow t">{k}</div>
               <div className="v">{money(v)}</div>
             </div>
           ))}
+
+          {report.allTime && Object.keys(report.byMarket).length > 0 && (
+            <>
+              <div className="cap mt16">Per market</div>
+              {Object.entries(report.byMarket).map(([k, v]) => (
+                <div className="row" key={k}>
+                  <div className="grow t">{k}</div>
+                  <div className="v">{money(v)}</div>
+                </div>
+              ))}
+            </>
+          )}
 
           {report.market && Object.keys(report.byDay).length > 0 && (
             <>
@@ -2389,7 +2412,7 @@ function App() {
             Copy as CSV instead
           </button>
           <div className="empty">
-            Three sheets: {report.market ? "the market's sales" : "the day's sales"} with notes, the stock you have left, and who still owes the common account.
+            Three sheets: {report.allTime ? "every sale ever" : report.market ? "the market's sales" : "the day's sales"} with notes, the stock you have left, and who still owes the common account.
           </div>
         </>
       )}
