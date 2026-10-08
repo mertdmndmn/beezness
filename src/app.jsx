@@ -108,6 +108,9 @@ function styleTotalRow(row) {
   });
 }
 
+// Alphabetical by name; numeric so "250g" sorts before "1000g".
+const byName = (a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" });
+
 function seedProduct(name, type, priceTi, priceLu) {
   return { id: uid(), name, type, price: { "loc-ti": priceTi, "loc-lu": priceLu } };
 }
@@ -727,7 +730,7 @@ function App() {
 
   const byType = useMemo(() => {
     const m = {};
-    data.products.forEach((p) => (m[p.type] = m[p.type] || []).push(p));
+    [...data.products].sort(byName).forEach((p) => (m[p.type] = m[p.type] || []).push(p));
     return m;
   }, [data.products]);
 
@@ -1692,7 +1695,7 @@ function App() {
           onClick={() => {
             setMarketDraft((d) => ({
               ...d,
-              items: data.products.map((p) => ({ pid: p.id, checked: false, price: priceOf(p, d.locId) })),
+              items: [...data.products].sort(byName).map((p) => ({ pid: p.id, checked: false, price: priceOf(p, d.locId) })),
             }));
             setTab("marketSetup2");
           }}
@@ -1850,7 +1853,7 @@ function App() {
     const marketSales = data.sales.filter((s) => s.marketId === activeMarket.id);
     const marketUnits = marketSales.reduce((s, x) => s + x.qty, 0);
     const marketCash = marketSales.reduce((s, x) => s + x.qty * x.price, 0);
-    const marketProducts = activeMarket.items.map((item) => data.products.find((p) => p.id === item.pid)).filter(Boolean);
+    const marketProducts = activeMarket.items.map((item) => data.products.find((p) => p.id === item.pid)).filter(Boolean).sort(byName);
     return (
       <div className="hl">
         <div className="top">
@@ -1949,7 +1952,7 @@ function App() {
             setMarketDraft({
               name: activeMarket.name,
               locId: activeMarket.locId,
-              items: data.products.map((p) => {
+              items: [...data.products].sort(byName).map((p) => {
                 const found = activeMarket.items.find((i) => i.pid === p.id);
                 return { pid: p.id, checked: !!found, price: found ? found.price : priceOf(p, activeMarket.locId) };
               }),
@@ -2224,6 +2227,19 @@ function App() {
                 <div className="s">{v.qty} sold</div>
               </div>
               <div className="v">{money(v.sum)}</div>
+            </div>
+          ))}
+
+          <hr className="rule" />
+          <div className="cap">Stock on hand</div>
+          <div className="row">
+            <div className="grow t">Items in stock</div>
+            <div className="v">{data.products.reduce((s, p) => s + Math.max(0, stockOf(p.id)), 0)}</div>
+          </div>
+          {data.locations.map((l) => (
+            <div className="row" key={l.id}>
+              <div className="grow t">Worth at {l.name} prices</div>
+              <div className="v">{money(data.products.reduce((s, p) => s + Math.max(0, stockOf(p.id)) * priceOf(p, l.id), 0))}</div>
             </div>
           ))}
 
