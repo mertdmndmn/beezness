@@ -14,12 +14,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes"];
-const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [] };
+const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes", "expenses"];
+const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [], expenses: [] };
 // Newer than the rest of the schema: a project that hasn't run that part of
 // schema.sql yet must still load, just without sale history (and without
 // the ability to move sales, since that would be a change with no record).
-const OPTIONAL_TABLES = new Set(["sale_changes"]);
+// Same for expenses: no table, no Expenses tab.
+const OPTIONAL_TABLES = new Set(["sale_changes", "expenses"]);
 
 const CACHE_KEY = "honey-till-cache-v1";
 const OUTBOX_KEY = "honey-till-outbox-v1";
@@ -108,8 +109,15 @@ function styleTotalRow(row) {
   });
 }
 
-// Alphabetical by name; numeric so "250g" sorts before "1000g".
-const byName = (a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" });
+// Alphabetical by name; numeric so "250g" sorts before "1000g". Letter sizes
+// ("Candle XS", "Candle M") sort small to big rather than alphabetically.
+const LETTER_SIZES = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"];
+const sizeKey = (name) =>
+  (name || "").replace(/\b(XXXL|XXL|XL|XXS|XS|S|M|L)\b/g, (m, _s, i, str) =>
+    // "1 L" is a volume, not a size.
+    /\d\s?$/.test(str.slice(0, i)) ? m : String(LETTER_SIZES.indexOf(m) + 1)
+  );
+const byName = (a, b) => sizeKey(a.name).localeCompare(sizeKey(b.name), undefined, { numeric: true, sensitivity: "base" });
 
 // Products that share a name apart from their size ("Castagno 250 g",
 // "Castagno 500 g") are one family. Each family with several sizes gets its
@@ -450,9 +458,13 @@ function App() {
   const [marketDraft, setMarketDraft] = useState(null);
   const [summaryMarket, setSummaryMarket] = useState(null);
   const [confirming, setConfirming] = useState(null); // "today" | "all" | "reset" | "acct:<id>" | null
-  // Whether sale_changes exists on the server: null until a fetch confirms
-  // either way (e.g. offline at boot). Moving a sale needs true.
-  const [historyReady, setHistoryReady] = useState(null);
+  // Which optional tables are missing on the server: null until a fetch
+  // confirms either way (e.g. offline at boot). Moving a sale needs
+  // sale_changes; recording an expense needs expenses.
+  const [missingTables, setMissingTables] = useState(null);
+  const historyReady = missingTables && !missingTables.includes("sale_changes");
+  const expensesReady = missingTables && !missingTables.includes("expenses");
+  const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
   // Pay screen, phone not in market mode while a market is open: did the
   // seller say this sale belongs to it? null = not touched, use the default.
@@ -544,7 +556,7 @@ function App() {
         } else {
           applyServer(server);
         }
-        setHistoryReady(!server.missing.includes("sale_changes"));
+        setMissingTables(server.missing);
       } catch {
         // offline at boot — keep showing whatever the cache already has
       }
@@ -561,7 +573,7 @@ function App() {
       try {
         const server = await fetchAll();
         applyServer(server);
-        setHistoryReady(!server.missing.includes("sale_changes"));
+        setMissingTables(server.missing);
       } catch {}
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -654,10 +666,12 @@ function App() {
     return channel;
   };
   useEffect(() => {
-    if (!session || historyReady !== true) return;
-    const channel = subscribeTables("honey-till-sync-optional", [...OPTIONAL_TABLES]).subscribe();
+    if (!session || !missingTables) return;
+    const present = [...OPTIONAL_TABLES].filter((t) => !missingTables.includes(t));
+    if (!present.length) return;
+    const channel = subscribeTables("honey-till-sync-optional", present).subscribe();
     return () => supabase.removeChannel(channel);
-  }, [Boolean(session), historyReady]);
+  }, [Boolean(session), String(missingTables)]);
   useEffect(() => {
     if (!session) return;
     const channel = subscribeTables(
@@ -1056,6 +1070,43 @@ function App() {
     setToast({ msg: `${account.name} settled CHF ${money(amt)}.` });
   };
 
+  // Money someone paid out of their own pocket for the business (a machine,
+  // jars, a stand fee). Beezness owes it back until it's marked paid back.
+  const addExpense = () => {
+    const amt = parseFloat(String(expDraft.amount).replace(",", "."));
+    const paidBy = expDraft.paidBy.trim();
+    const what = expDraft.what.trim();
+    if (isNaN(amt) || amt <= 0 || !paidBy || !what || expensesReady !== true) return;
+    const today = new Date();
+    const picked = expDraft.date ? new Date(`${expDraft.date}T12:00:00`) : today;
+    const ts = picked.toDateString() === today.toDateString() ? Date.now() : picked.getTime();
+    const row = { id: uid(), ts, paidBy, what, amount: round2(amt), repaidAt: null };
+    save({ expenses: [row, ...data.expenses] }, [{ table: "expenses", type: "insert", id: row.id, row }]);
+    saveMyName(paidBy);
+    setExpDraft(null);
+    setToast({ msg: `Beezness owes ${paidBy} CHF ${money(amt)} for ${what}.` });
+  };
+  const setExpenseRepaid = (e, repaid) => {
+    const repaidAt = repaid ? Date.now() : null;
+    save({ expenses: data.expenses.map((x) => (x.id === e.id ? { ...x, repaidAt } : x)) }, [{ table: "expenses", type: "update", id: e.id, row: { repaidAt } }]);
+  };
+  const expenseInfo = useMemo(() => {
+    const byPerson = {};
+    data.expenses.forEach((e) => {
+      const p = (byPerson[e.paidBy] ||= { name: e.paidBy, spent: 0, owed: 0 });
+      p.spent += Number(e.amount) || 0;
+      if (!e.repaidAt) p.owed += Number(e.amount) || 0;
+    });
+    const people = Object.values(byPerson).sort((a, b) => b.owed - a.owed || a.name.localeCompare(b.name));
+    return {
+      people,
+      owed: round2(people.reduce((s, p) => s + p.owed, 0)),
+      spent: round2(people.reduce((s, p) => s + p.spent, 0)),
+      list: [...data.expenses].sort((a, b) => b.ts - a.ts),
+    };
+  }, [data.expenses]);
+  const payerNames = [...new Set([...data.accounts.filter((a) => !a.common).map((a) => a.name), ...data.expenses.map((e) => e.paidBy)])];
+
   const clearTodaySales = () => {
     const day = dayKey(Date.now());
     const rows = data.sales.filter((s) => dayKey(s.ts) === day);
@@ -1083,6 +1134,7 @@ function App() {
       ...data.sales.map((row) => ({ table: "sales", type: "delete", id: row.id })),
       ...data.transfers.map((row) => ({ table: "transfers", type: "delete", id: row.id })),
       ...data.markets.map((row) => ({ table: "markets", type: "delete", id: row.id })),
+      ...data.expenses.map((row) => ({ table: "expenses", type: "delete", id: row.id })),
       ...data.batches.map((row) => ({ table: "batches", type: "delete", id: row.id })),
       ...data.products.map((row) => ({ table: "products", type: "delete", id: row.id })),
       ...data.accounts.map((row) => ({ table: "accounts", type: "delete", id: row.id })),
@@ -1100,6 +1152,7 @@ function App() {
         sales: [],
         transfers: [],
         markets: [],
+        expenses: [],
       },
       ops
     );
@@ -2075,6 +2128,7 @@ function App() {
           ["sell", "Sell"],
           ["report", "Z report"],
           ["settle", "Who owes"],
+          ["expenses", "Expenses"],
           ["admin", "Admin"],
         ].map(([id, label]) => (
           <button key={id} data-on={tab === id ? "1" : "0"} onClick={() => setTab(id)}>
@@ -2464,6 +2518,135 @@ function App() {
                     className="x"
                     onClick={() => save({ transfers: data.transfers.filter((x) => x.id !== t.id) }, [{ table: "transfers", type: "delete", id: t.id }])}
                     aria-label="Remove transfer"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+
+      {tab === "expenses" && (
+        <>
+          <div className="cap">Beezness owes back</div>
+          <div className="big" style={{ fontSize: 34, margin: "6px 0 4px" }}>
+            <small>CHF</small>
+            {money(expenseInfo.owed)}
+          </div>
+          <div className="empty pt0">
+            Paid for something out of your own pocket? Write it here, and it stays owed to you until it's marked paid back.
+          </div>
+
+          {expensesReady === false ? (
+            <div className="settle" style={{ borderColor: "var(--clay)", background: "var(--clay-soft)" }}>
+              <div className="s">
+                Expenses aren't switched on yet. Run the expenses part of supabase/schema.sql in the Supabase SQL editor, then refresh.
+              </div>
+            </div>
+          ) : expDraft ? (
+            <div className="settle">
+              <div className="cap mb6">New expense</div>
+              <input
+                list="expense-payers"
+                value={expDraft.paidBy}
+                onChange={(e) => setExpDraft({ ...expDraft, paidBy: e.target.value })}
+                placeholder="Who paid"
+                style={{ width: "100%", marginBottom: 7, fontFamily: "'Barlow',sans-serif" }}
+              />
+              <datalist id="expense-payers">
+                {payerNames.map((n) => (
+                  <option key={n} value={n} />
+                ))}
+              </datalist>
+              <input
+                value={expDraft.what}
+                onChange={(e) => setExpDraft({ ...expDraft, what: e.target.value })}
+                placeholder="What for, e.g. honey extractor"
+                style={{ width: "100%", marginBottom: 7, fontFamily: "'Barlow',sans-serif" }}
+              />
+              <div className="payrow" style={{ marginTop: 0 }}>
+                <input
+                  inputMode="decimal"
+                  value={expDraft.amount}
+                  onChange={(e) => setExpDraft({ ...expDraft, amount: e.target.value })}
+                  placeholder="CHF"
+                  style={{ width: 100 }}
+                />
+                <input
+                  type="date"
+                  value={expDraft.date}
+                  onChange={(e) => setExpDraft({ ...expDraft, date: e.target.value })}
+                  style={{ flex: 1, minWidth: 0, fontFamily: "'Barlow',sans-serif" }}
+                />
+              </div>
+              <div className="payrow">
+                <button
+                  className="ghost solid wide"
+                  disabled={expensesReady !== true}
+                  onClick={addExpense}
+                >
+                  {expensesReady === true ? "Save expense" : "Waiting for connection…"}
+                </button>
+                <button className="ghost tiny" onClick={() => setExpDraft(null)}>
+                  ×
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              className="ghost solid wide mb6"
+              onClick={() => {
+                const d = new Date();
+                const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                setExpDraft({ paidBy: loadMyName(), what: "", amount: "", date });
+              }}
+            >
+              Add an expense
+            </button>
+          )}
+
+          {expenseInfo.people.map((p) => (
+            <div className="settle" key={p.name}>
+              <div className="settle-head">
+                <div className="grow">
+                  <div className="t" style={{ fontSize: 17, fontWeight: 600 }}>
+                    {p.name}
+                  </div>
+                  <div className="s">spent {money(p.spent)} · paid back {money(p.spent - p.owed)}</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div className="cap">Owed</div>
+                  <div className="num" style={{ fontSize: 20, fontWeight: 600, color: p.owed > 0 ? "var(--clay)" : "var(--sage)" }}>
+                    {money(p.owed)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {expenseInfo.list.length > 0 && (
+            <>
+              <hr className="rule" />
+              <div className="cap">Every expense</div>
+              {expenseInfo.list.map((e) => (
+                <div className="row" key={e.id} style={{ opacity: e.repaidAt ? 0.6 : 1 }}>
+                  <div className="grow">
+                    <div className="t">{e.what}</div>
+                    <div className="s">
+                      {e.paidBy} · {shortDate(e.ts)}
+                      {e.repaidAt ? ` · paid back ${shortDate(e.repaidAt)}` : ""}
+                    </div>
+                  </div>
+                  <div className="v">{money(e.amount)}</div>
+                  <button className="ghost tiny" onClick={() => setExpenseRepaid(e, !e.repaidAt)}>
+                    {e.repaidAt ? "Undo" : "Paid back"}
+                  </button>
+                  <button
+                    className="x"
+                    onClick={() => save({ expenses: data.expenses.filter((x) => x.id !== e.id) }, [{ table: "expenses", type: "delete", id: e.id }])}
+                    aria-label="Remove expense"
                   >
                     ×
                   </button>

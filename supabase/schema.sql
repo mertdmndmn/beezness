@@ -150,3 +150,20 @@ create policy "authenticated append" on sale_changes for insert
 -- changes with no extra step. If your project isn't set up that way,
 -- check Database > Replication in the dashboard and toggle these 6 tables
 -- on there instead of via SQL (avoids fighting an existing publication).
+
+-- Expenses: money someone paid out of their own pocket for the business
+-- (a machine, jars, a stand fee). Beezness owes it back until "repaidAt"
+-- is set. Additive and optional: the app runs without it, just without
+-- the Expenses tab. Safe to run on its own in the SQL editor.
+create table if not exists expenses (
+  id text primary key,
+  ts bigint not null,
+  "paidBy" text not null,
+  what text not null,
+  amount numeric not null,
+  "repaidAt" bigint
+);
+alter table expenses enable row level security;
+drop policy if exists "authenticated full access" on expenses;
+create policy "authenticated full access" on expenses for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
