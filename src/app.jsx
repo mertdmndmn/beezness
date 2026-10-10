@@ -1152,9 +1152,12 @@ function App() {
       </button>
     </div>
   ) : (
-    <button className="ghost wide" style={{ margin: "6px 0 12px" }} onClick={() => setTipping({ amount: "" })}>
-      + Tip
-    </button>
+    <div className="tiles mb10">
+      <button className="tile" onClick={() => setTipping({ amount: "" })}>
+        <b>Tip</b>
+        <div className="pr">any amount</div>
+      </button>
+    </div>
   );
 
   const recordPayment = (account) => {
