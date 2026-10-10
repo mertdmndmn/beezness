@@ -458,6 +458,7 @@ function App() {
   const [outboxStatus, setOutboxStatus] = useState({ pending: 0, failed: [] });
   const lastStockTapRef = useRef({});
   const [qty, setQty] = useState(1);
+  const [editLine, setEditLine] = useState(null); // index of the basket line being re-priced, or null
   const [unitPrice, setUnitPrice] = useState(0);
   const [priceMode, setPriceMode] = useState("full");
   const [receipt, setReceipt] = useState(null);
@@ -895,18 +896,42 @@ function App() {
   }, [data.sales, data.transfers, data.accounts]);
 
   // ---- actions ----
-  const pickProduct = (product) => {
+  // Tapping a tile drops one at full price straight into the basket; tapping
+  // again adds another. Price changes (half, gift, custom) happen by tapping
+  // the line in the basket, which opens the product screen for that line.
+  const quickAdd = (product) => {
+    if (stockOf(product.id) - inCartQty(product.id) <= 0) return;
+    const list = effectivePrice(product);
+    const next = [...cart];
+    const idx = next.findIndex((l) => l.pid === product.id && l.price === list && l.mode === "full");
+    if (idx >= 0) next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
+    else next.push({ pid: product.id, name: product.name, type: product.type, price: list, list, mode: "full", qty: 1 });
+    setCart(next);
+  };
+
+  const changeLineQty = (i, delta) => {
+    const line = cart[i];
+    if (!line) return;
+    if (delta > 0 && stockOf(line.pid) - inCartQty(line.pid) <= 0) return;
+    const q = line.qty + delta;
+    setCart(q <= 0 ? cart.filter((_, j) => j !== i) : cart.map((l, j) => (j === i ? { ...l, qty: q } : l)));
+  };
+
+  const pickProduct = (product, lineIdx = null) => {
+    const line = lineIdx === null ? null : cart[lineIdx];
     setPickedProduct(product);
-    setQty(1);
-    setUnitPrice(effectivePrice(product));
-    setPriceMode("full");
+    setEditLine(line ? lineIdx : null);
+    setQty(line ? line.qty : 1);
+    setUnitPrice(line ? line.price : effectivePrice(product));
+    setPriceMode(line ? line.mode : "full");
   };
 
   const addToCart = (goToPay) => {
     const product = pickedProduct;
     const list = effectivePrice(product);
     const price = priceMode === "gift" ? 0 : Number(unitPrice) || 0;
-    const next = [...cart];
+    const next = editLine === null ? [...cart] : cart.filter((_, j) => j !== editLine);
+    setEditLine(null);
     const idx = next.findIndex((l) => l.pid === product.id && l.price === price && l.mode === priceMode);
     if (idx >= 0) next[idx] = { ...next[idx], qty: next[idx].qty + qty };
     else next.push({ pid: product.id, name: product.name, type: product.type, price, list, mode: priceMode, qty });
@@ -1142,6 +1167,42 @@ function App() {
         {showAllSales ? "▴ Show only the latest" : `▾ Show ${hidden} earlier sale${hidden === 1 ? "" : "s"}`}
       </button>
     );
+
+  const basketPanel = cart.length > 0 && (
+    <div className="bag">
+      <div className="cap">Basket · tap an item to change its price</div>
+      <div style={{ maxHeight: "32vh", overflowY: "auto" }}>
+      {cart.map((l, i) => (
+        <div className="line" key={i}>
+          <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            <button className="step" onClick={() => changeLineQty(i, -1)} aria-label="One less">
+              −
+            </button>
+            <b className="num">{l.qty}</b>
+            <button className="step" onClick={() => changeLineQty(i, 1)} aria-label="One more">
+              +
+            </button>
+            <button
+              className="x"
+              style={{ textAlign: "left", fontSize: 14, color: "inherit", padding: 0 }}
+              onClick={() => {
+                const product = data.products.find((p) => p.id === l.pid);
+                if (product) pickProduct(product, i);
+              }}
+            >
+              {l.name}
+              {l.mode === "gift" ? " (gift)" : l.price < l.list ? " (reduced)" : ""}
+            </button>
+          </span>
+          <span className="num">{money(l.qty * l.price)}</span>
+        </div>
+      ))}
+      </div>
+      <button className="ghost solid wide mt8" style={{ padding: 18, fontSize: 17 }} onClick={() => setTab("pay")}>
+        Next · CHF {money(cartTotal)} →
+      </button>
+    </div>
+  );
 
   const tipPanel = tipping ? (
     <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "12px 13px", margin: "6px 0 12px" }}>
@@ -1581,12 +1642,19 @@ function App() {
 
   if (pickedProduct) {
     const listPrice = effectivePrice(pickedProduct);
-    const available = stockOf(pickedProduct.id) - inCartQty(pickedProduct.id);
+    const editingQty = editLine !== null && cart[editLine] ? cart[editLine].qty : 0;
+    const available = stockOf(pickedProduct.id) - inCartQty(pickedProduct.id) + editingQty;
     const maxQty = Math.max(1, available);
     const previewPrice = priceMode === "gift" ? 0 : Number(unitPrice) || 0;
     return (
       <div className="hl">
-        <button className="ghost" onClick={() => setPickedProduct(null)}>
+        <button
+          className="ghost"
+          onClick={() => {
+            setPickedProduct(null);
+            setEditLine(null);
+          }}
+        >
           ← Back
         </button>
         <div style={{ marginTop: 18 }}>
@@ -1659,12 +1727,20 @@ function App() {
             />
           </div>
         </div>
-        <button className="ghost solid wide mt16" onClick={() => addToCart(true)}>
-          Confirm · CHF {money(cartTotal + qty * previewPrice)}
-        </button>
-        <button className="ghost wide mt8" onClick={() => addToCart(false)}>
-          Add another item first
-        </button>
+        {editLine !== null ? (
+          <button className="ghost solid wide mt16" onClick={() => addToCart(false)}>
+            Save · back to basket
+          </button>
+        ) : (
+          <>
+            <button className="ghost solid wide mt16" onClick={() => addToCart(true)}>
+              Confirm · CHF {money(cartTotal + qty * previewPrice)}
+            </button>
+            <button className="ghost wide mt8" onClick={() => addToCart(false)}>
+              Add another item first
+            </button>
+          </>
+        )}
       </div>
     );
   }
@@ -2125,7 +2201,7 @@ function App() {
             {row.map((p) => {
               const available = stockOf(p.id) - inCartQty(p.id);
               return (
-                <button key={p.id} className="tile" disabled={available <= 0} onClick={() => pickProduct(p)}>
+                <button key={p.id} className="tile" disabled={available <= 0} onClick={() => quickAdd(p)}>
                   {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
                   <b>{p.name}</b>
                   <div className="pr">CHF {money(effectivePrice(p))}</div>
@@ -2140,35 +2216,7 @@ function App() {
 
         {tipPanel}
 
-        {cart.length > 0 && (
-          <div className="bag">
-            <div className="cap">This sale</div>
-            {cart.map((l, i) => (
-              <div className="line" key={i}>
-                <span>
-                  {l.qty}× {l.name}
-                  {l.mode === "gift" ? " (gift)" : l.price < l.list ? " (reduced)" : ""}
-                </span>
-                <span>
-                  <span className="num">{money(l.qty * l.price)}</span>
-                  <button className="x" onClick={() => setCart(cart.filter((_, j) => j !== i))} aria-label="Remove line">
-                    ×
-                  </button>
-                </span>
-              </div>
-            ))}
-            <div className="tot">
-              <span className="cap">Total</span>
-              <span className="big">
-                <small>CHF</small>
-                {money(cartTotal)}
-              </span>
-            </div>
-            <button className="ghost solid wide" onClick={() => setTab("pay")}>
-              Note &amp; account →
-            </button>
-          </div>
-        )}
+        {basketPanel}
 
         <hr className="rule" />
         <div className="cap">Today's sales</div>
@@ -2395,7 +2443,7 @@ function App() {
                   {row.map((p) => {
                     const available = stockOf(p.id) - inCartQty(p.id);
                     return (
-                      <button key={p.id} className="tile" disabled={available <= 0} onClick={() => pickProduct(p)}>
+                      <button key={p.id} className="tile" disabled={available <= 0} onClick={() => quickAdd(p)}>
                         {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
                         <b>{p.name}</b>
                         <div className="pr">CHF {money(priceOf(p))}</div>
@@ -2412,35 +2460,7 @@ function App() {
 
           {tipPanel}
 
-          {cart.length > 0 && (
-            <div className="bag">
-              <div className="cap">This sale</div>
-              {cart.map((l, i) => (
-                <div className="line" key={i}>
-                  <span>
-                    {l.qty}× {l.name}
-                    {l.mode === "gift" ? " (gift)" : l.price < l.list ? " (reduced)" : ""}
-                  </span>
-                  <span>
-                    <span className="num">{money(l.qty * l.price)}</span>
-                    <button className="x" onClick={() => setCart(cart.filter((_, j) => j !== i))} aria-label="Remove line">
-                      ×
-                    </button>
-                  </span>
-                </div>
-              ))}
-              <div className="tot">
-                <span className="cap">Total</span>
-                <span className="big">
-                  <small>CHF</small>
-                  {money(cartTotal)}
-                </span>
-              </div>
-              <button className="ghost solid wide" onClick={() => setTab("pay")}>
-                Note &amp; account →
-              </button>
-            </div>
-          )}
+          {basketPanel}
 
           <hr className="rule" />
           <div className="cap">Today at {locationName(activeLoc)}</div>
