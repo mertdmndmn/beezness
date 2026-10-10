@@ -1240,6 +1240,21 @@ function App() {
     </div>
   );
 
+  // Markets can run over several days: reopen an ended one so the next
+  // day's sales land in the same market (and its Z report).
+  const reopenMarket = (m) => {
+    if (openMarket) return;
+    save(
+      { markets: data.markets.map((x) => (x.id === m.id ? { ...x, endedAt: null } : x)) },
+      [{ table: "markets", type: "update", id: m.id, row: { endedAt: null } }]
+    );
+    clearDismissedMarket();
+    setDismissedMarket(null);
+    setMarketDraft(null);
+    setTab("market");
+    setToast({ msg: `${m.name} is open again.` });
+  };
+
   const recordPayment = (account) => {
     const amt = parseFloat(String(payAmount).replace(",", "."));
     if (isNaN(amt) || amt === 0) return;
@@ -1943,6 +1958,10 @@ function App() {
 
   if (tab === "marketSetup1" && marketDraft) {
     const marketNames = [...new Set(data.markets.map((m) => m.name))];
+    const recentEnded = data.markets
+      .filter((m) => m.endedAt && Date.now() - m.endedAt < 14 * 24 * 3600 * 1000)
+      .sort((a, b) => b.endedAt - a.endedAt)
+      .slice(0, 5);
     return (
       <div className="hl">
         <button className="ghost" onClick={() => setTab("sell")}>
@@ -1951,6 +1970,20 @@ function App() {
         <div style={{ marginTop: 18 }}>
           <h1 className="xl">Start market day</h1>
         </div>
+        {recentEnded.length > 0 && (
+          <>
+            <div className="cap mb6 mt16">Same market as before? Continue it</div>
+            {recentEnded.map((m) => (
+              <button key={m.id} className="who" onClick={() => reopenMarket(m)}>
+                <b>Continue {m.name}</b>
+                <span>
+                  {locationName(m.locId)} · {marketSpan(m)}
+                </span>
+              </button>
+            ))}
+            <div className="cap mb6 mt16">Or start a new one</div>
+          </>
+        )}
         <div className="cap mb6 mt16">Market name</div>
         <input
           list="marketnames"
