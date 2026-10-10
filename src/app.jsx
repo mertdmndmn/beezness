@@ -473,6 +473,7 @@ function App() {
   const expensesReady = missingTables && !missingTables.includes("expenses");
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
+  const [editingNote, setEditingNote] = useState(null); // { ticket, text } while a market sale's note is being fixed
   // Pay screen, phone not in market mode while a market is open: did the
   // seller say this sale belongs to it? null = not touched, use the default.
   const [tagMarket, setTagMarket] = useState(null);
@@ -1086,6 +1087,17 @@ function App() {
     );
     setSummaryMarket(ended);
     setTab("sell");
+  };
+
+  const saveTicketNote = (ticket, text) => {
+    const note = text.trim() || null;
+    const rows = data.sales.filter((s) => s.ticket === ticket && (s.note || null) !== note);
+    if (rows.length)
+      save(
+        { sales: data.sales.map((s) => (s.ticket === ticket ? { ...s, note } : s)) },
+        rows.map((r) => ({ table: "sales", type: "update", id: r.id, row: { note } }))
+      );
+    setEditingNote(null);
   };
 
   const recordPayment = (account) => {
@@ -1831,9 +1843,20 @@ function App() {
     const confirmSetup = () => {
       const ticked = marketDraft.items.filter((i) => i.checked).map((i) => ({ pid: i.pid, price: Number(i.price) || 0 }));
       if (isEditing) {
+        // A typo in the name can be fixed here too. Sales carry the market
+        // name (for reports and exports), so they follow along.
+        const name = marketDraft.name.trim() || activeMarket.name;
+        const renamed = name !== activeMarket.name;
+        const renamedSales = renamed ? data.sales.filter((s) => s.marketId === activeMarket.id) : [];
         save(
-          { markets: data.markets.map((m) => (m.id === activeMarket.id ? { ...m, items: ticked } : m)) },
-          [{ table: "markets", type: "update", id: activeMarket.id, row: { items: ticked } }]
+          {
+            markets: data.markets.map((m) => (m.id === activeMarket.id ? { ...m, name, items: ticked } : m)),
+            ...(renamed && { sales: data.sales.map((s) => (s.marketId === activeMarket.id ? { ...s, market: name } : s)) }),
+          },
+          [
+            { table: "markets", type: "update", id: activeMarket.id, row: renamed ? { name, items: ticked } : { items: ticked } },
+            ...renamedSales.map((r) => ({ table: "sales", type: "update", id: r.id, row: { market: name } })),
+          ]
         );
       } else {
         const row = {
@@ -1868,6 +1891,16 @@ function App() {
           <h1 className="xl">What are we selling today?</h1>
           <div className="cap sub">{marketDraft.name || locationName(marketDraft.locId)}</div>
         </div>
+        {isEditing && (
+          <>
+            <div className="cap mb6 mt16">Market name</div>
+            <input
+              value={marketDraft.name}
+              onChange={(e) => setMarketDraft({ ...marketDraft, name: e.target.value })}
+              style={{ fontFamily: "'Barlow',sans-serif", marginBottom: 12 }}
+            />
+          </>
+        )}
         <div className="empty pt0">Tick what's in the car, and adjust the price for this market if it's different.</div>
         {marketDraft.items.map((item, i) => {
           const product = data.products.find((p) => p.id === item.pid);
@@ -1905,7 +1938,7 @@ function App() {
           );
         })}
         <button className="ghost solid wide mt14" onClick={confirmSetup}>
-          {isEditing ? "Save today's table" : "Start market"}
+          {isEditing ? "Save" : "Start market"}
         </button>
       </div>
     );
@@ -1995,7 +2028,7 @@ function App() {
         {syncFailurePanel}
 
         {marketProducts.length === 0 && (
-          <div className="empty">No products picked for today — use "Edit today's table" below.</div>
+          <div className="empty">No products picked for today — use "Edit name or today's table" below.</div>
         )}
         {tileRows(marketProducts).map((row) => (
           <div className="tiles mb10" key={row[0].id}>
@@ -2055,12 +2088,34 @@ function App() {
                 {s.qty}× {s.name}
                 {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
               </div>
-              <div className="s">
-                {timeStr(s.ts)} · {s.account}
-                {s.note ? ` · ${s.note}` : ""}
-              </div>
+              {editingNote && editingNote.ticket === s.ticket ? (
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <input
+                    autoFocus
+                    value={editingNote.text}
+                    placeholder="Note"
+                    onChange={(e) => setEditingNote({ ...editingNote, text: e.target.value })}
+                    onKeyDown={(e) => e.key === "Enter" && saveTicketNote(s.ticket, editingNote.text)}
+                    style={{ flex: 1, minWidth: 0, fontFamily: "'Barlow',sans-serif" }}
+                  />
+                  <button className="ghost tiny" onClick={() => saveTicketNote(s.ticket, editingNote.text)}>
+                    Save
+                  </button>
+                  <button className="ghost tiny" onClick={() => setEditingNote(null)}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div className="s">
+                  {timeStr(s.ts)} · {s.account}
+                  {s.note ? ` · ${s.note}` : ""}
+                </div>
+              )}
             </div>
             <div className="v">{money(s.qty * s.price)}</div>
+            <button className="x" onClick={() => setEditingNote({ ticket: s.ticket, text: s.note || "" })} aria-label="Edit note">
+              ✎
+            </button>
             <button className="x" onClick={() => deleteTicket(s.ticket)} aria-label="Delete this sale">
               ×
             </button>
@@ -2082,7 +2137,7 @@ function App() {
             setTab("marketSetup2");
           }}
         >
-          Edit today's table
+          Edit name or today's table
         </button>
         <button className="ghost wide mt8" onClick={endMarket}>
           End market day
