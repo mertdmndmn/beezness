@@ -473,7 +473,7 @@ function App() {
   const expensesReady = missingTables && !missingTables.includes("expenses");
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
-  const [editingNote, setEditingNote] = useState(null); // { ticket, text } while a market sale's note is being fixed
+  const [repaying, setRepaying] = useState(null); // { ticket, by } while a market sale's payment is being corrected
   // Pay screen, phone not in market mode while a market is open: did the
   // seller say this sale belongs to it? null = not touched, use the default.
   const [tagMarket, setTagMarket] = useState(null);
@@ -768,7 +768,7 @@ function App() {
 
   const today = useMemo(() => {
     const day = dayKey(Date.now());
-    const list = data.sales.filter((s) => dayKey(s.ts) === day && s.locId === activeLoc);
+    const list = data.sales.filter((s) => dayKey(s.ts) === day && s.locId === activeLoc).sort((a, b) => b.ts - a.ts);
     return {
       list,
       units: list.reduce((s, x) => s + x.qty, 0),
@@ -1087,17 +1087,6 @@ function App() {
     );
     setSummaryMarket(ended);
     setTab("sell");
-  };
-
-  const saveTicketNote = (ticket, text) => {
-    const note = text.trim() || null;
-    const rows = data.sales.filter((s) => s.ticket === ticket && (s.note || null) !== note);
-    if (rows.length)
-      save(
-        { sales: data.sales.map((s) => (s.ticket === ticket ? { ...s, note } : s)) },
-        rows.map((r) => ({ table: "sales", type: "update", id: r.id, row: { note } }))
-      );
-    setEditingNote(null);
   };
 
   const recordPayment = (account) => {
@@ -2003,7 +1992,7 @@ function App() {
   }
 
   if (activeMarket) {
-    const marketSales = data.sales.filter((s) => s.marketId === activeMarket.id);
+    const marketSales = data.sales.filter((s) => s.marketId === activeMarket.id).sort((a, b) => b.ts - a.ts);
     const marketUnits = marketSales.reduce((s, x) => s + x.qty, 0);
     const marketCash = marketSales.reduce((s, x) => s + x.qty * x.price, 0);
     const marketProducts = activeMarket.items.map((item) => data.products.find((p) => p.id === item.pid)).filter(Boolean).sort(byName);
@@ -2088,32 +2077,60 @@ function App() {
                 {s.qty}× {s.name}
                 {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
               </div>
-              {editingNote && editingNote.ticket === s.ticket ? (
-                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                  <input
-                    autoFocus
-                    value={editingNote.text}
-                    placeholder="Note"
-                    onChange={(e) => setEditingNote({ ...editingNote, text: e.target.value })}
-                    onKeyDown={(e) => e.key === "Enter" && saveTicketNote(s.ticket, editingNote.text)}
-                    style={{ flex: 1, minWidth: 0, fontFamily: "'Barlow',sans-serif" }}
-                  />
-                  <button className="ghost tiny" onClick={() => saveTicketNote(s.ticket, editingNote.text)}>
-                    Save
-                  </button>
-                  <button className="ghost tiny" onClick={() => setEditingNote(null)}>
+              <div className="s">
+                {timeStr(s.ts)} · {s.account}
+                {s.note ? ` · ${s.note}` : ""}
+              </div>
+              {repaying && repaying.ticket === s.ticket && (
+                <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "10px 11px", marginTop: 8 }}>
+                  {historyReady === true ? (
+                    <>
+                      <div className="cap mb6">Actually paid with</div>
+                      {!loadMyName() && (
+                        <input
+                          value={repaying.by}
+                          onChange={(e) => setRepaying({ ...repaying, by: e.target.value })}
+                          placeholder="Your name (asked once)"
+                          style={{ width: "100%", marginBottom: 8, fontFamily: "'Barlow',sans-serif" }}
+                        />
+                      )}
+                      {data.accounts
+                        .filter((a) => a.id !== s.accountId)
+                        .map((a) => (
+                          <button
+                            key={a.id}
+                            className="who"
+                            disabled={!repaying.by.trim()}
+                            onClick={() => {
+                              moveTicket(s.ticket, a, repaying.by, "Wrong payment picked at the market");
+                              setRepaying(null);
+                            }}
+                          >
+                            <b>{a.name}</b>
+                            <span>
+                              {a.method}
+                              {a.common ? " · common" : ""}
+                            </span>
+                          </button>
+                        ))}
+                    </>
+                  ) : (
+                    <div style={{ fontSize: 14, lineHeight: 1.5 }}>
+                      Can't change payments until sale history is reachable on the server — nothing changes without a record.
+                    </div>
+                  )}
+                  <button className="ghost tiny mt8" onClick={() => setRepaying(null)}>
                     Cancel
                   </button>
-                </div>
-              ) : (
-                <div className="s">
-                  {timeStr(s.ts)} · {s.account}
-                  {s.note ? ` · ${s.note}` : ""}
                 </div>
               )}
             </div>
             <div className="v">{money(s.qty * s.price)}</div>
-            <button className="x" onClick={() => setEditingNote({ ticket: s.ticket, text: s.note || "" })} aria-label="Edit note">
+            <button
+              className="x"
+              onClick={() => setRepaying(repaying && repaying.ticket === s.ticket ? null : { ticket: s.ticket, by: loadMyName() })}
+              aria-label="Change payment"
+            >
               ✎
             </button>
             <button className="x" onClick={() => deleteTicket(s.ticket)} aria-label="Delete this sale">
