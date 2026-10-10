@@ -478,6 +478,7 @@ function App() {
   const expensesReady = missingTables && !missingTables.includes("expenses");
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
+  const [showAllSales, setShowAllSales] = useState(false);
   const [tipping, setTipping] = useState(null); // { amount } while the market tip form is open
   const [repaying, setRepaying] = useState(null); // { ticket, by } while a market sale's payment is being corrected
   // Pay screen, phone not in market mode while a market is open: did the
@@ -1123,6 +1124,24 @@ function App() {
     setTipping(null);
     setToast({ msg: `Tip CHF ${money(amount)} → ${account.name}`, undo: row.ticket });
   };
+
+  // Sales lists (newest first) keep only the latest few sales open so the
+  // buttons below stay in reach; the rest fold away behind a toggle. Lines of
+  // one sale stay together.
+  const RECENT_SALES = 3;
+  const foldSales = (list) => {
+    const tickets = [...new Set(list.map((s) => s.ticket))];
+    const hidden = Math.max(0, tickets.length - RECENT_SALES);
+    if (showAllSales || !hidden) return { shown: list, hidden };
+    const recent = new Set(tickets.slice(0, RECENT_SALES));
+    return { shown: list.filter((s) => recent.has(s.ticket)), hidden };
+  };
+  const salesToggle = (hidden) =>
+    hidden > 0 && (
+      <button className="ghost tiny wide mt8" onClick={() => setShowAllSales(!showAllSales)}>
+        {showAllSales ? "▴ Show only the latest" : `▾ Show ${hidden} earlier sale${hidden === 1 ? "" : "s"}`}
+      </button>
+    );
 
   const tipPanel = tipping ? (
     <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "12px 13px", margin: "6px 0 12px" }}>
@@ -2154,7 +2173,7 @@ function App() {
         <hr className="rule" />
         <div className="cap">Today's sales</div>
         {marketSales.length === 0 && <div className="empty">Nothing sold yet.</div>}
-        {marketSales.map((s) => (
+        {foldSales(marketSales).shown.map((s) => (
           <div className="row" key={s.id}>
             <div className="grow">
               <div className="t">
@@ -2237,6 +2256,7 @@ function App() {
             </button>
           </div>
         ))}
+        {salesToggle(foldSales(marketSales).hidden)}
 
         <hr className="rule" />
         <button
@@ -2425,7 +2445,7 @@ function App() {
           <hr className="rule" />
           <div className="cap">Today at {locationName(activeLoc)}</div>
           {today.list.length === 0 && <div className="empty">Nothing sold here yet today.</div>}
-          {today.list.map((s) => (
+          {foldSales(today.list).shown.map((s) => (
             <div className="row" key={s.id}>
               <div className="grow">
                 <div className="t">
@@ -2443,6 +2463,7 @@ function App() {
               </button>
             </div>
           ))}
+          {salesToggle(foldSales(today.list).hidden)}
         </>
       )}
 
