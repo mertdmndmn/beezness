@@ -2130,9 +2130,27 @@ function App() {
                       Can't change payments until sale history is reachable on the server — nothing changes without a record.
                     </div>
                   )}
-                  <button className="ghost tiny mt8" onClick={() => setRepaying(null)}>
-                    Cancel
-                  </button>
+                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                    <button className="ghost tiny" onClick={() => setRepaying(null)}>
+                      Cancel
+                    </button>
+                    {repaying.confirmDelete ? (
+                      <button
+                        className="ghost tiny danger solid"
+                        style={{ marginLeft: "auto" }}
+                        onClick={() => {
+                          deleteTicket(s.ticket);
+                          setRepaying(null);
+                        }}
+                      >
+                        Yes, delete this sale
+                      </button>
+                    ) : (
+                      <button className="ghost tiny danger" style={{ marginLeft: "auto" }} onClick={() => setRepaying({ ...repaying, confirmDelete: true })}>
+                        Delete sale…
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -2143,9 +2161,6 @@ function App() {
               aria-label="Change payment"
             >
               ✎
-            </button>
-            <button className="x" onClick={() => deleteTicket(s.ticket)} aria-label="Delete this sale">
-              ×
             </button>
           </div>
         ))}
