@@ -1254,6 +1254,11 @@ function App() {
     );
   };
 
+  // Tells index.html not to auto-reload into a new version mid-sale.
+  useEffect(() => {
+    window.__beeBusy = cart.length > 0 || !!pickedProduct || !!cashAccount || tab === "pay";
+  }, [cart.length, pickedProduct, cashAccount, tab]);
+
   // Toasts get out of the way by themselves; ones with Undo stay a bit
   // longer so there's time to tap it.
   useEffect(() => {

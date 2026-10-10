@@ -169,6 +169,24 @@ input.mini{width:78px;min-width:0;padding:9px;text-align:right}
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(function(){});
 }
+// A home-screen app is usually resumed, not reloaded, so it can keep running
+// an old version for days. When it comes back to the foreground, check the
+// deployed version and reload if it changed, unless a sale is in progress.
+(function () {
+  function deployed() {
+    return fetch("sw.js?_v=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { return r.text(); })
+      .then(function (t) { return (t.match(/beezness-v\d+/) || [])[0] || null; });
+  }
+  var running = null;
+  deployed().then(function (v) { running = v; }).catch(function () {});
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState !== "visible" || !running) return;
+    deployed().then(function (v) {
+      if (v && v !== running && !window.__beeBusy) location.reload();
+    }).catch(function () {});
+  });
+})();
 </script>
 </body>
 </html>
