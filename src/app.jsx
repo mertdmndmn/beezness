@@ -1096,7 +1096,7 @@ function App() {
   };
 
   const addTip = (account, amount) => {
-    if (!activeMarket || !(amount > 0)) return;
+    if (!(amount > 0)) return;
     const row = {
       id: uid(),
       ticket: uid(),
@@ -1109,13 +1109,13 @@ function App() {
       mode: "full",
       qty: 1,
       note: "",
-      locId: activeMarket.locId,
-      location: locationName(activeMarket.locId),
+      locId: contextLocId,
+      location: locationName(contextLocId),
       accountId: account.id,
       account: account.name,
       method: account.method,
-      marketId: activeMarket.id,
-      market: activeMarket.name,
+      marketId: activeMarket ? activeMarket.id : null,
+      market: activeMarket ? activeMarket.name : null,
       cashReceived: null,
       cashChange: null,
     };
@@ -1123,6 +1123,39 @@ function App() {
     setTipping(null);
     setToast({ msg: `Tip CHF ${money(amount)} → ${account.name}`, undo: row.ticket });
   };
+
+  const tipPanel = tipping ? (
+    <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "12px 13px", margin: "6px 0 12px" }}>
+      <div className="cap mb6">Tip — how much?</div>
+      <input
+        autoFocus
+        inputMode="decimal"
+        placeholder="CHF"
+        value={tipping.amount}
+        onChange={(e) => setTipping({ amount: e.target.value })}
+      />
+      <div className="cap mt16 mb6">Which account is it going to?</div>
+      {data.accounts.map((a) => {
+        const amount = round2(parseFloat(String(tipping.amount).replace(",", ".")) || 0);
+        return (
+          <button key={a.id} className="who" disabled={!(amount > 0)} onClick={() => addTip(a, amount)}>
+            <b>{a.name}</b>
+            <span>
+              {a.method}
+              {a.common ? " · common" : ""}
+            </span>
+          </button>
+        );
+      })}
+      <button className="ghost tiny mt8" onClick={() => setTipping(null)}>
+        Cancel
+      </button>
+    </div>
+  ) : (
+    <button className="ghost wide" style={{ margin: "6px 0 12px" }} onClick={() => setTipping({ amount: "" })}>
+      + Tip
+    </button>
+  );
 
   const recordPayment = (account) => {
     const amt = parseFloat(String(payAmount).replace(",", "."));
@@ -2083,38 +2116,7 @@ function App() {
           </div>
         ))}
 
-        {tipping ? (
-          <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "12px 13px", margin: "6px 0 12px" }}>
-            <div className="cap mb6">Tip — how much?</div>
-            <input
-              autoFocus
-              inputMode="decimal"
-              placeholder="CHF"
-              value={tipping.amount}
-              onChange={(e) => setTipping({ amount: e.target.value })}
-            />
-            <div className="cap mt16 mb6">Which account is it going to?</div>
-            {data.accounts.map((a) => {
-              const amount = round2(parseFloat(String(tipping.amount).replace(",", ".")) || 0);
-              return (
-                <button key={a.id} className="who" disabled={!(amount > 0)} onClick={() => addTip(a, amount)}>
-                  <b>{a.name}</b>
-                  <span>
-                    {a.method}
-                    {a.common ? " · common" : ""}
-                  </span>
-                </button>
-              );
-            })}
-            <button className="ghost tiny mt8" onClick={() => setTipping(null)}>
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button className="ghost wide" style={{ margin: "6px 0 12px" }} onClick={() => setTipping({ amount: "" })}>
-            + Tip
-          </button>
-        )}
+        {tipPanel}
 
         {cart.length > 0 && (
           <div className="bag">
@@ -2385,6 +2387,8 @@ function App() {
             </div>
           ))}
 
+          {tipPanel}
+
           {cart.length > 0 && (
             <div className="bag">
               <div className="cap">This sale</div>
@@ -2422,7 +2426,7 @@ function App() {
             <div className="row" key={s.id}>
               <div className="grow">
                 <div className="t">
-                  {s.qty}× {s.name}
+                  {s.pid === TIP_PID ? "Tip" : `${s.qty}× ${s.name}`}
                   {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
                 </div>
                 <div className="s">
