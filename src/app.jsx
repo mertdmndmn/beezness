@@ -28,6 +28,11 @@ const FAILED_OUTBOX_KEY = "honey-till-outbox-failed-v1";
 const LEGACY_KEY = "honey-till-v5"; // last on-device-only schema, kept for one-time import
 const MIGRATED_FLAG = "honey-till-migrated-v1";
 const DISMISSED_MARKET_KEY = "honey-till-dismissed-market";
+// A tip is recorded as a sale line with this stand-in product id, so it
+// lands in the account, Who owes and the Z report like any other money,
+// but never counts as an item sold or touches stock.
+const TIP_PID = "tip";
+const unitsOf = (rows) => rows.reduce((s, x) => s + (x.pid === TIP_PID ? 0 : x.qty), 0);
 const MY_NAME_KEY = "honey-till-my-name";
 
 const PRODUCT_TYPES = ["Honey", "Candle", "Lip balm", "Other"];
@@ -473,6 +478,7 @@ function App() {
   const expensesReady = missingTables && !missingTables.includes("expenses");
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
+  const [tipping, setTipping] = useState(null); // { amount } while the market tip form is open
   const [repaying, setRepaying] = useState(null); // { ticket, by } while a market sale's payment is being corrected
   // Pay screen, phone not in market mode while a market is open: did the
   // seller say this sale belongs to it? null = not touched, use the default.
@@ -771,7 +777,7 @@ function App() {
     const list = data.sales.filter((s) => dayKey(s.ts) === day && s.locId === activeLoc).sort((a, b) => b.ts - a.ts);
     return {
       list,
-      units: list.reduce((s, x) => s + x.qty, 0),
+      units: unitsOf(list),
       cash: list.reduce((s, x) => s + x.qty * x.price, 0),
     };
   }, [data.sales, activeLoc]);
@@ -836,7 +842,7 @@ function App() {
       multiDay: allTime || !!market,
       byDay,
       total: rows.reduce((s, x) => s + x.qty * x.price, 0),
-      units: rows.reduce((s, x) => s + x.qty, 0),
+      units: unitsOf(rows),
       tickets: new Set(rows.map((s) => s.ticket)).size,
       byMarket,
       gifts,
@@ -1087,6 +1093,35 @@ function App() {
     );
     setSummaryMarket(ended);
     setTab("sell");
+  };
+
+  const addTip = (account, amount) => {
+    if (!activeMarket || !(amount > 0)) return;
+    const row = {
+      id: uid(),
+      ticket: uid(),
+      ts: Date.now(),
+      pid: TIP_PID,
+      name: "Tip",
+      type: "Tip",
+      price: amount,
+      list: amount,
+      mode: "full",
+      qty: 1,
+      note: "",
+      locId: activeMarket.locId,
+      location: locationName(activeMarket.locId),
+      accountId: account.id,
+      account: account.name,
+      method: account.method,
+      marketId: activeMarket.id,
+      market: activeMarket.name,
+      cashReceived: null,
+      cashChange: null,
+    };
+    save({ sales: [row, ...data.sales] }, [{ table: "sales", type: "insert", id: row.id, row }]);
+    setTipping(null);
+    setToast({ msg: `Tip CHF ${money(amount)} → ${account.name}`, undo: row.ticket });
   };
 
   const recordPayment = (account) => {
@@ -1936,7 +1971,7 @@ function App() {
   if (summaryMarket) {
     const rows = data.sales.filter((s) => s.marketId === summaryMarket.id);
     const total = rows.reduce((s, x) => s + x.qty * x.price, 0);
-    const units = rows.reduce((s, x) => s + x.qty, 0);
+    const units = unitsOf(rows);
     const byItem = {};
     const byAcct = {};
     rows.forEach((s) => {
@@ -1993,7 +2028,7 @@ function App() {
 
   if (activeMarket) {
     const marketSales = data.sales.filter((s) => s.marketId === activeMarket.id).sort((a, b) => b.ts - a.ts);
-    const marketUnits = marketSales.reduce((s, x) => s + x.qty, 0);
+    const marketUnits = unitsOf(marketSales);
     const marketCash = marketSales.reduce((s, x) => s + x.qty * x.price, 0);
     const marketProducts = activeMarket.items.map((item) => data.products.find((p) => p.id === item.pid)).filter(Boolean).sort(byName);
     return (
@@ -2048,6 +2083,39 @@ function App() {
           </div>
         ))}
 
+        {tipping ? (
+          <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "12px 13px", margin: "6px 0 12px" }}>
+            <div className="cap mb6">Tip — how much?</div>
+            <input
+              autoFocus
+              inputMode="decimal"
+              placeholder="CHF"
+              value={tipping.amount}
+              onChange={(e) => setTipping({ amount: e.target.value })}
+            />
+            <div className="cap mt16 mb6">Which account is it going to?</div>
+            {data.accounts.map((a) => {
+              const amount = round2(parseFloat(String(tipping.amount).replace(",", ".")) || 0);
+              return (
+                <button key={a.id} className="who" disabled={!(amount > 0)} onClick={() => addTip(a, amount)}>
+                  <b>{a.name}</b>
+                  <span>
+                    {a.method}
+                    {a.common ? " · common" : ""}
+                  </span>
+                </button>
+              );
+            })}
+            <button className="ghost tiny mt8" onClick={() => setTipping(null)}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button className="ghost wide" style={{ margin: "6px 0 12px" }} onClick={() => setTipping({ amount: "" })}>
+            + Tip
+          </button>
+        )}
+
         {cart.length > 0 && (
           <div className="bag">
             <div className="cap">This sale</div>
@@ -2085,7 +2153,7 @@ function App() {
           <div className="row" key={s.id}>
             <div className="grow">
               <div className="t">
-                {s.qty}× {s.name}
+                {s.pid === TIP_PID ? "Tip" : `${s.qty}× ${s.name}`}
                 {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
               </div>
               <div className="s">
