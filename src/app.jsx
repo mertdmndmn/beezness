@@ -757,10 +757,21 @@ function App() {
     const verify = async () => {
       const { data: rows, error } = await supabase.from("markets").select("id,endedAt").eq("id", openMarket.id);
       if (cancelled || error) return; // can't confirm — leave it, try again later
-      const stillOpen = rows.length && !rows[0].endedAt;
-      if (!stillOpen) {
+      // This phone's own change to the market (just started, reopened,
+      // edited) may still be waiting to reach the server — then the server
+      // is the stale one, not us.
+      const pending = [...loadOutbox(), ...loadFailedOutbox()].some((op) => op.table === "markets" && op.id === openMarket.id);
+      if (pending) return;
+      if (!rows.length) {
         setData((d) => {
           const next = { ...d, markets: d.markets.filter((m) => m.id !== openMarket.id) };
+          saveCache(next);
+          return next;
+        });
+      } else if (rows[0].endedAt) {
+        const endedAt = rows[0].endedAt;
+        setData((d) => {
+          const next = { ...d, markets: d.markets.map((m) => (m.id === openMarket.id ? { ...m, endedAt } : m)) };
           saveCache(next);
           return next;
         });
@@ -1253,6 +1264,10 @@ function App() {
       [{ table: "markets", type: "update", id: m.id, row: { endedAt, closedAt } }]
     );
   };
+
+  useEffect(() => {
+    if (tab === "market" && !activeMarket) setTab("sell");
+  }, [tab, Boolean(activeMarket)]);
 
   // Tells index.html not to auto-reload into a new version mid-sale.
   useEffect(() => {
