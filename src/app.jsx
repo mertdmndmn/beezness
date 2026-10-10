@@ -2162,6 +2162,10 @@ function App() {
     const rows = data.sales.filter((s) => s.marketId === summaryMarket.id);
     const total = rows.reduce((s, x) => s + x.qty * x.price, 0);
     const units = unitsOf(rows);
+    const todayKey = dayKey(Date.now());
+    const todayRows = rows.filter((s) => dayKey(s.ts) === todayKey);
+    const todayTotal = todayRows.reduce((s, x) => s + x.qty * x.price, 0);
+    const multiDayMarket = todayRows.length < rows.length;
     const byItem = {};
     const byAcct = {};
     rows.forEach((s) => {
@@ -2176,13 +2180,25 @@ function App() {
           <div className="cap">Market day done</div>
           <h1 className="xl">{summaryMarket.name}</h1>
         </div>
+        {multiDayMarket && (
+          <div className="stat">
+            <div>
+              <div className="cap">Today's takings</div>
+              <div className="n">{money(todayTotal)}</div>
+            </div>
+            <div>
+              <div className="cap">Sold today</div>
+              <div className="n">{unitsOf(todayRows)}</div>
+            </div>
+          </div>
+        )}
         <div className="stat">
           <div>
-            <div className="cap">Takings</div>
+            <div className="cap">{multiDayMarket ? "Whole market" : "Takings"}</div>
             <div className="n">{money(total)}</div>
           </div>
           <div>
-            <div className="cap">Jars sold</div>
+            <div className="cap">{multiDayMarket ? "Sold, all days" : "Items sold"}</div>
             <div className="n">{units}</div>
           </div>
         </div>
@@ -2231,6 +2247,12 @@ function App() {
     const marketSales = data.sales.filter((s) => s.marketId === activeMarket.id).sort((a, b) => b.ts - a.ts);
     const marketUnits = unitsOf(marketSales);
     const marketCash = marketSales.reduce((s, x) => s + x.qty * x.price, 0);
+    // A market can run over several days: today's takings lead, the whole
+    // market's total sits underneath once there's more than one day.
+    const todayKey = dayKey(Date.now());
+    const todaySales = marketSales.filter((s) => dayKey(s.ts) === todayKey);
+    const todayCash = todaySales.reduce((s, x) => s + x.qty * x.price, 0);
+    const multiDayMarket = todaySales.length < marketSales.length;
     const marketProducts = activeMarket.items.map((item) => data.products.find((p) => p.id === item.pid)).filter(Boolean).sort(byName);
     return (
       <div className="hl">
@@ -2253,11 +2275,16 @@ function App() {
           <div style={{ textAlign: "right" }}>
             <div className="big">
               <small>CHF</small>
-              {money(marketCash)}
+              {money(multiDayMarket ? todayCash : marketCash)}
             </div>
             <div className="cap" style={{ marginTop: 4 }}>
-              {marketUnits} sold
+              {multiDayMarket ? `today · ${unitsOf(todaySales)} sold` : `${marketUnits} sold`}
             </div>
+            {multiDayMarket && (
+              <div className="cap" style={{ marginTop: 4 }}>
+                whole market CHF {money(marketCash)} · {marketUnits} sold
+              </div>
+            )}
           </div>
         </div>
 
@@ -2289,7 +2316,7 @@ function App() {
         {basketPanel}
 
         <hr className="rule" />
-        <div className="cap">Today's sales</div>
+        <div className="cap">{multiDayMarket ? "Sales, all days" : "Today's sales"}</div>
         {marketSales.length === 0 && <div className="empty">Nothing sold yet.</div>}
         {foldSales(marketSales).shown.map((s) => (
           <div className="row" key={s.id}>
@@ -2299,6 +2326,7 @@ function App() {
                 {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
               </div>
               <div className="s">
+                {dayKey(s.ts) !== todayKey ? `${shortDate(s.ts)} ` : ""}
                 {timeStr(s.ts)} · {s.account}
                 {s.note ? ` · ${s.note}` : ""}
               </div>
