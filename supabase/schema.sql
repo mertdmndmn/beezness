@@ -82,6 +82,10 @@ create table if not exists markets (
   "endedAt" bigint
 );
 
+-- Additive: a market can run over several days (ended, then reopened).
+-- closedAt marks one as finished for good so it stops being offered.
+alter table markets add column if not exists "closedAt" bigint;
+
 -- Additive: which market (if any) a sale belongs to. Nullable so existing
 -- sales rows are unaffected.
 alter table sales add column if not exists "marketId" text;

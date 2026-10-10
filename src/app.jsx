@@ -1242,6 +1242,19 @@ function App() {
 
   // Markets can run over several days: reopen an ended one so the next
   // day's sales land in the same market (and its Z report).
+  // "Closed for good" needs the markets.closedAt column (see schema.sql).
+  // Rows fetched from the server carry the key, even as null, once it exists.
+  const closingReady = data.markets.some((m) => "closedAt" in m);
+  const closeMarketForGood = (m) => {
+    const closedAt = Date.now();
+    const endedAt = m.endedAt || closedAt;
+    save(
+      { markets: data.markets.map((x) => (x.id === m.id ? { ...x, endedAt, closedAt } : x)) },
+      [{ table: "markets", type: "update", id: m.id, row: { endedAt, closedAt } }]
+    );
+    setToast({ msg: `${m.name} is closed for good.` });
+  };
+
   const reopenMarket = (m) => {
     if (openMarket) return;
     save(
@@ -1959,7 +1972,7 @@ function App() {
   if (tab === "marketSetup1" && marketDraft) {
     const marketNames = [...new Set(data.markets.map((m) => m.name))];
     const recentEnded = data.markets
-      .filter((m) => m.endedAt && Date.now() - m.endedAt < 14 * 24 * 3600 * 1000)
+      .filter((m) => m.endedAt && !m.closedAt && Date.now() - m.endedAt < 14 * 24 * 3600 * 1000)
       .sort((a, b) => b.endedAt - a.endedAt)
       .slice(0, 5);
     return (
@@ -1974,12 +1987,19 @@ function App() {
           <>
             <div className="cap mb6 mt16">Same market as before? Continue it</div>
             {recentEnded.map((m) => (
-              <button key={m.id} className="who" onClick={() => reopenMarket(m)}>
-                <b>Continue {m.name}</b>
-                <span>
-                  {locationName(m.locId)} · {marketSpan(m)}
-                </span>
-              </button>
+              <div key={m.id} style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+                <button className="who" style={{ flex: 1, minWidth: 0 }} onClick={() => reopenMarket(m)}>
+                  <b>Continue {m.name}</b>
+                  <span>
+                    {locationName(m.locId)} · {marketSpan(m)}
+                  </span>
+                </button>
+                {closingReady && (
+                  <button className="ghost tiny" style={{ flex: "none", alignSelf: "center" }} onClick={() => closeMarketForGood(m)}>
+                    Close for good
+                  </button>
+                )}
+              </div>
             ))}
             <div className="cap mb6 mt16">Or start a new one</div>
           </>
@@ -2184,8 +2204,19 @@ function App() {
           </>
         )}
         <button className="ghost solid wide mt16" onClick={() => setSummaryMarket(null)}>
-          Back to BeeZness
+          Back to BeeZness · continue another day
         </button>
+        {closingReady && (
+          <button
+            className="ghost wide mt8"
+            onClick={() => {
+              closeMarketForGood(summaryMarket);
+              setSummaryMarket(null);
+            }}
+          >
+            Last day — close {summaryMarket.name} for good
+          </button>
+        )}
       </div>
     );
   }
