@@ -2001,7 +2001,18 @@ function App() {
         <div className="top">
           <div>
             <h1>{activeMarket.name}</h1>
-            <div className="cap">Market day</div>
+            <div className="cap">
+              Market day
+              {" · "}
+              <button
+                className="x"
+                style={{ fontSize: 13, padding: 0, verticalAlign: "baseline" }}
+                onClick={() => window.location.reload()}
+                aria-label="Refresh app"
+              >
+                ⟳ refresh
+              </button>
+            </div>
           </div>
           <div style={{ textAlign: "right" }}>
             <div className="big">
