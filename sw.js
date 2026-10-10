@@ -1,4 +1,4 @@
-const CACHE = "beezness-v22";
+const CACHE = "beezness-v23";
 const FILES = ["./", "./index.html", "./app.js", "./icon.png", "./manifest.json"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));

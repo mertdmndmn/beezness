@@ -1252,8 +1252,15 @@ function App() {
       { markets: data.markets.map((x) => (x.id === m.id ? { ...x, endedAt, closedAt } : x)) },
       [{ table: "markets", type: "update", id: m.id, row: { endedAt, closedAt } }]
     );
-    setToast({ msg: `${m.name} is closed for good.` });
   };
+
+  // Toasts get out of the way by themselves; ones with Undo stay a bit
+  // longer so there's time to tap it.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), toast.undo ? 5000 : 2500);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const reopenMarket = (m) => {
     if (openMarket) return;
@@ -1265,7 +1272,6 @@ function App() {
     setDismissedMarket(null);
     setMarketDraft(null);
     setTab("market");
-    setToast({ msg: `${m.name} is open again.` });
   };
 
   const recordPayment = (account) => {
