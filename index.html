@@ -57,6 +57,9 @@ h2{font-family:'Sora',sans-serif;font-weight:600;font-size:17px;line-height:1.2;
   box-shadow:0 1px 2px rgba(29,26,22,.04);transition:box-shadow .15s,transform .15s}
 .tile:hover{box-shadow:0 4px 14px rgba(29,26,22,.08);transform:translateY(-1px)}
 .tile:active{transform:translateY(0);box-shadow:0 1px 2px rgba(29,26,22,.04)}
+.tile[data-on="1"]{border-color:var(--honey);background:var(--honey-soft)}
+.tile[data-gift="1"]:not([disabled]){border:1px dashed var(--honey)}
+.tile .pr[data-noprice="1"]{color:var(--clay)}
 .tile[disabled]{opacity:.5;cursor:default;box-shadow:none;transform:none}
 .tile b{display:block;font-family:'Sora',sans-serif;font-size:15px;font-weight:600;line-height:1.25}
 .tile .pr{font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:500;margin-top:8px;color:var(--soft)}

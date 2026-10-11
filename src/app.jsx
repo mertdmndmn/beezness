@@ -480,6 +480,7 @@ function App() {
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
   const [showAllSales, setShowAllSales] = useState(false);
+  const [giftMode, setGiftMode] = useState(false); // next product tile tapped goes in as a gift
   const [tipping, setTipping] = useState(null); // { amount } while the market tip form is open
   const [repaying, setRepaying] = useState(null); // { ticket, by } while a market sale's payment is being corrected
   // Pay screen, phone not in market mode while a market is open: did the
@@ -721,6 +722,9 @@ function App() {
 
   const locationName = (id) => (data.locations.find((l) => l.id === id) || {}).name || "—";
   const priceOf = (product, locId = activeLoc) => Number((product.price || {})[locId] || 0);
+  // A product with no price at one place still has a sensible starting
+  // price for a market: the first place that does price it.
+  const anyPriceOf = (product) => Number(Object.values(product.price || {}).find((v) => Number(v) > 0) || 0);
   const inCartQty = (pid) => cart.filter((l) => l.pid === pid).reduce((s, l) => s + l.qty, 0);
   const cartTotal = cart.reduce((s, l) => s + l.qty * l.price, 0);
 
@@ -913,11 +917,14 @@ function App() {
   const quickAdd = (product) => {
     if (stockOf(product.id) - inCartQty(product.id) <= 0) return;
     const list = effectivePrice(product);
+    const mode = giftMode ? "gift" : "full";
+    const price = giftMode ? 0 : list;
     const next = [...cart];
-    const idx = next.findIndex((l) => l.pid === product.id && l.price === list && l.mode === "full");
+    const idx = next.findIndex((l) => l.pid === product.id && l.price === price && l.mode === mode);
     if (idx >= 0) next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
-    else next.push({ pid: product.id, name: product.name, type: product.type, price: list, list, mode: "full", qty: 1 });
+    else next.push({ pid: product.id, name: product.name, type: product.type, price, list, mode, qty: 1 });
     setCart(next);
+    setGiftMode(false);
   };
 
   const changeLineQty = (i, delta) => {
@@ -1247,6 +1254,10 @@ function App() {
       <button className="tile" onClick={() => setTipping({ amount: "" })}>
         <b>Tip</b>
         <div className="pr">any amount</div>
+      </button>
+      <button className="tile" data-on={giftMode ? "1" : "0"} onClick={() => setGiftMode(!giftMode)}>
+        <b>Gift</b>
+        <div className="pr">{giftMode ? "now tap a product ↑" : "give one away"}</div>
       </button>
     </div>
   );
@@ -2061,7 +2072,7 @@ function App() {
           onClick={() => {
             setMarketDraft((d) => ({
               ...d,
-              items: [...data.products].sort(byName).map((p) => ({ pid: p.id, checked: false, price: priceOf(p, d.locId) })),
+              items: [...data.products].sort(byName).map((p) => ({ pid: p.id, checked: false, price: priceOf(p, d.locId) || anyPriceOf(p) })),
             }));
             setTab("marketSetup2");
           }}
@@ -2318,10 +2329,12 @@ function App() {
             {row.map((p) => {
               const available = stockOf(p.id) - inCartQty(p.id);
               return (
-                <button key={p.id} className="tile" disabled={available <= 0} onClick={() => quickAdd(p)}>
+                <button key={p.id} className="tile" data-gift={giftMode ? "1" : "0"} disabled={available <= 0} onClick={() => quickAdd(p)}>
                   {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
                   <b>{p.name}</b>
-                  <div className="pr">CHF {money(effectivePrice(p))}</div>
+                  <div className="pr" data-noprice={effectivePrice(p) > 0 ? "0" : "1"}>
+                    {effectivePrice(p) > 0 ? `CHF ${money(effectivePrice(p))}` : "no price set"}
+                  </div>
                   <div className="st" data-low={available <= 3 ? "1" : "0"}>
                     {available > 0 ? `${available} left` : "sold out"}
                   </div>
@@ -2433,7 +2446,7 @@ function App() {
               locId: activeMarket.locId,
               items: [...data.products].sort(byName).map((p) => {
                 const found = activeMarket.items.find((i) => i.pid === p.id);
-                return { pid: p.id, checked: !!found, price: found ? found.price : priceOf(p, activeMarket.locId) };
+                return { pid: p.id, checked: !!found, price: found ? found.price : priceOf(p, activeMarket.locId) || anyPriceOf(p) };
               }),
             });
             setTab("marketSetup2");
@@ -2561,10 +2574,12 @@ function App() {
                   {row.map((p) => {
                     const available = stockOf(p.id) - inCartQty(p.id);
                     return (
-                      <button key={p.id} className="tile" disabled={available <= 0} onClick={() => quickAdd(p)}>
+                      <button key={p.id} className="tile" data-gift={giftMode ? "1" : "0"} disabled={available <= 0} onClick={() => quickAdd(p)}>
                         {inCartQty(p.id) > 0 && <span className="inbag">{inCartQty(p.id)}</span>}
                         <b>{p.name}</b>
-                        <div className="pr">CHF {money(priceOf(p))}</div>
+                        <div className="pr" data-noprice={priceOf(p) > 0 ? "0" : "1"}>
+                          {priceOf(p) > 0 ? `CHF ${money(priceOf(p))}` : "no price set"}
+                        </div>
                         <div className="st" data-low={available <= 3 ? "1" : "0"}>
                           {available > 0 ? `${available} left` : "sold out"}
                         </div>
