@@ -486,6 +486,7 @@ function App() {
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
   const [showAllSales, setShowAllSales] = useState(false);
   const [giftMode, setGiftMode] = useState(false); // next product tile tapped goes in as a gift
+  const [invoiceAsk, setInvoiceAsk] = useState(false); // invoice tapped without a customer name yet
   const [tipping, setTipping] = useState(null); // { amount } while the market tip form is open
   const [repaying, setRepaying] = useState(null); // { ticket, by } while a market sale's payment is being corrected
   // Pay screen, phone not in market mode while a market is open: did the
@@ -1910,10 +1911,46 @@ function App() {
           </button>
         ))}
         <div className="cap mt16 mb6">Not paid yet?</div>
-        <button className="who" disabled={!note.trim()} onClick={() => checkout(INVOICE_ACCOUNT)}>
-          <b>Invoice — pay later</b>
-          <span>{note.trim() ? `to ${note.trim()}` : "write who it's for in the note first"}</span>
-        </button>
+        {invoiceAsk ? (
+          <div style={{ background: "var(--honey-soft)", border: "1px solid var(--honey)", borderRadius: 14, padding: "12px 13px" }}>
+            <div className="cap mb6">Who is the invoice for?</div>
+            <input
+              autoFocus
+              placeholder="Customer name"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              style={{ fontFamily: "'Barlow',sans-serif" }}
+            />
+            <button
+              className="ghost solid wide mt8"
+              disabled={!note.trim()}
+              onClick={() => {
+                setInvoiceAsk(false);
+                checkout(INVOICE_ACCOUNT);
+              }}
+            >
+              Put CHF {money(cartTotal)} on invoice
+            </button>
+            <button className="ghost tiny mt8" onClick={() => setInvoiceAsk(false)}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            className="who"
+            onClick={() => {
+              if (!note.trim()) {
+                setInvoiceAsk(true);
+                return;
+              }
+              setInvoiceAsk(false);
+              checkout(INVOICE_ACCOUNT);
+            }}
+          >
+            <b>Invoice — pay later</b>
+            <span>{note.trim() ? `to ${note.trim()}` : "not paid yet"}</span>
+          </button>
+        )}
       </div>
     );
   }
