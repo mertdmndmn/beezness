@@ -470,6 +470,7 @@ function App() {
   const [toast, setToast] = useState(null);
   const [reportDay, setReportDay] = useState(() => dayKey(Date.now()));
   const [reportLoc, setReportLoc] = useState("all");
+  const [statsMarket, setStatsMarket] = useState("all");
   const [settlingId, setSettlingId] = useState(null);
   const [payAmount, setPayAmount] = useState("");
   const [payNote, setPayNote] = useState("");
@@ -875,6 +876,39 @@ function App() {
       byLoc,
     };
   }, [data.sales, data.markets, reportDay, reportLoc]);
+
+  // Average sold per market day, for packing stock before the next market.
+  // Markets are grouped by name, so a weekly market that's set up fresh each
+  // time still adds up. A "day" is any day that market recorded a sale, and
+  // every product is divided by all of them — days it didn't sell count as 0.
+  const marketNames = useMemo(
+    () => [...new Set(reportMarkets.map((m) => m.name))].filter((n) => data.sales.some((s) => s.marketId && s.market === n)),
+    [reportMarkets, data.sales]
+  );
+  const stats = useMemo(() => {
+    const rows = data.sales.filter((s) => s.marketId && (statsMarket === "all" || s.market === statsMarket));
+    const days = new Set(rows.map((s) => `${s.marketId}|${dayKey(s.ts)}`));
+    const byItem = {};
+    rows.forEach((s) => {
+      if (s.pid === TIP_PID) return;
+      const it = (byItem[s.pid] = byItem[s.pid] || { pid: s.pid, name: s.name, qty: 0, sum: 0, perDay: {} });
+      const d = `${s.marketId}|${dayKey(s.ts)}`;
+      it.qty += s.qty;
+      it.sum += s.qty * s.price;
+      it.perDay[d] = (it.perDay[d] || 0) + s.qty;
+    });
+    const n = days.size || 1;
+    const items = Object.values(byItem)
+      .map((it) => ({ ...it, avg: it.qty / n, best: Math.max(...Object.values(it.perDay)) }))
+      .sort((a, b) => b.avg - a.avg || byName(a, b));
+    return {
+      days: days.size,
+      items,
+      avgTakings: rows.reduce((t, s) => t + s.qty * s.price, 0) / n,
+      avgUnits: unitsOf(rows) / n,
+    };
+  }, [data.sales, statsMarket]);
+  const avgStr = (n) => (Math.round(n * 10) / 10).toString();
 
   // Every sale lands in exactly one bucket — a person, the common account,
   // or unassigned (its account can't be found, e.g. it was removed in
@@ -2605,6 +2639,7 @@ function App() {
         {[
           ["sell", "Sell"],
           ["report", "Z report"],
+          ["stats", "Stats"],
           ["settle", "Who owes"],
           ["expenses", "Expenses"],
           ["admin", "Admin"],
@@ -2828,6 +2863,56 @@ function App() {
           <div className="empty">
             Three sheets: {report.allTime ? "every sale ever" : report.market ? "the market's sales" : "the day's sales"} with notes, the stock you have left, and who still owes the common account.
           </div>
+        </>
+      )}
+
+      {tab === "stats" && (
+        <>
+          <div className="cap mb6">Market</div>
+          <select value={statsMarket} onChange={(e) => setStatsMarket(e.target.value)}>
+            <option value="all">All markets</option>
+            {marketNames.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+
+          {stats.days === 0 ? (
+            <div className="empty">No market sales yet. Start a market day from the Sell tab and the averages show up here.</div>
+          ) : (
+            <>
+              <div className="stat mt12">
+                <div>
+                  <div className="cap">Market days</div>
+                  <div className="n">{stats.days}</div>
+                </div>
+                <div>
+                  <div className="cap">CHF / day</div>
+                  <div className="n">{money(stats.avgTakings)}</div>
+                </div>
+                <div>
+                  <div className="cap">Items / day</div>
+                  <div className="n">{avgStr(stats.avgUnits)}</div>
+                </div>
+              </div>
+
+              <hr className="rule" />
+              <div className="cap">Average per day, by product</div>
+              {stats.items.map((it) => (
+                <div className="row" key={it.pid}>
+                  <div className="grow">
+                    <div className="t">{it.name}</div>
+                    <div className="s">
+                      {it.qty} sold in {stats.days} {stats.days === 1 ? "day" : "days"} · best day {it.best}
+                    </div>
+                  </div>
+                  <div className="v">{avgStr(it.avg)} / day</div>
+                </div>
+              ))}
+              <div className="empty">Counts every item that left the stall, gifts included. Tips are left out.</div>
+            </>
+          )}
         </>
       )}
 
