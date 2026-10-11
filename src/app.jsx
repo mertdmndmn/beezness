@@ -32,6 +32,11 @@ const DISMISSED_MARKET_KEY = "honey-till-dismissed-market";
 // lands in the account, Who owes and the Z report like any other money,
 // but never counts as an item sold or touches stock.
 const TIP_PID = "tip";
+// Sold on invoice: the money hasn't arrived anywhere yet. These sales wait
+// under "Open invoices" in Who owes until they're moved to the account the
+// payment came into.
+const INVOICE_ACCOUNT = { id: "invoice", name: "Invoice", method: "Invoice", common: false };
+const isInvoice = (s) => s.accountId === INVOICE_ACCOUNT.id;
 const unitsOf = (rows) => rows.reduce((s, x) => s + (x.pid === TIP_PID ? 0 : x.qty), 0);
 const MY_NAME_KEY = "honey-till-my-name";
 
@@ -882,9 +887,11 @@ function App() {
     const salesBy = {};
     const commonSales = [];
     const unassignedSales = [];
+    const invoiceSales = [];
     data.sales.forEach((s) => {
       const a = resolve(s);
-      if (!a) unassignedSales.push(s);
+      if (isInvoice(s)) invoiceSales.push(s);
+      else if (!a) unassignedSales.push(s);
       else if (a.common) commonSales.push(s);
       else (salesBy[a.id] ||= []).push(s);
     });
@@ -907,6 +914,8 @@ function App() {
       commonTickets: groupTickets(commonSales),
       unassigned: sum(unassignedSales),
       unassignedTickets: groupTickets(unassignedSales),
+      invoiced: sum(invoiceSales),
+      invoiceTickets: groupTickets(invoiceSales),
     };
   }, [data.sales, data.transfers, data.accounts]);
 
@@ -925,6 +934,20 @@ function App() {
     else next.push({ pid: product.id, name: product.name, type: product.type, price, list, mode, qty: 1 });
     setCart(next);
     setGiftMode(false);
+  };
+
+  const setLineQty = (i, n) => {
+    const line = cart[i];
+    if (!line) return;
+    const q = Math.floor(Number(n) || 0);
+    if (q <= 0) {
+      setCart(cart.filter((_, j) => j !== i));
+      return;
+    }
+    const max = stockOf(line.pid) - (inCartQty(line.pid) - line.qty);
+    const capped = Math.min(q, Math.max(0, max));
+    if (capped < q) setToast({ msg: `Only ${capped} ${line.name} in stock — add stock in Admin for more.` });
+    setCart(capped <= 0 ? cart.filter((_, j) => j !== i) : cart.map((l, j) => (j === i ? { ...l, qty: capped } : l)));
   };
 
   const changeLineQty = (i, delta) => {
@@ -1188,7 +1211,7 @@ function App() {
 
   const basketPanel = cart.length > 0 && (
     <div className="bag">
-      <div className="cap">Basket · tap an item to change its price</div>
+      <div className="cap">Basket · tap a number to type it, tap an item to change its price</div>
       <div style={{ maxHeight: "32vh", overflowY: "auto" }}>
       {cart.map((l, i) => (
         <div className="line" key={i}>
@@ -1196,7 +1219,7 @@ function App() {
             <button className="step" onClick={() => changeLineQty(i, -1)} aria-label="One less">
               −
             </button>
-            <b className="num">{l.qty}</b>
+            <EditableField mono cls="qtyin" value={l.qty} onCommit={(v) => setLineQty(i, v)} />
             <button className="step" onClick={() => changeLineQty(i, 1)} aria-label="One more">
               +
             </button>
@@ -1530,6 +1553,7 @@ function App() {
     [
       ["Held by people", settleInfo.heldByPeople],
       ["Paid straight to common", settleInfo.common],
+      ["Open invoices, not paid yet", settleInfo.invoiced],
       ["Unassigned", settleInfo.unassigned],
     ].forEach(([label, v]) => (settleSheet.addRow([label, "", round2(v)]).getCell(3).numFmt = XLSX_MONEY_FMT));
     const takenRow = settleSheet.addRow(["Taken", "", round2(settleInfo.taken)]);
@@ -1602,6 +1626,7 @@ function App() {
       "",
       `Held by people,${money(settleInfo.heldByPeople)}`,
       `Paid straight to common,${money(settleInfo.common)}`,
+      `Open invoices not paid yet,${money(settleInfo.invoiced)}`,
       `Unassigned,${money(settleInfo.unassigned)}`,
       `Taken,${money(settleInfo.taken)}`
     );
@@ -1669,7 +1694,7 @@ function App() {
     </div>
   );
 
-  const ticketRow = (t) => (
+  const ticketRow = (t, moveLabel) => (
     <div key={t.ticket} style={{ borderBottom: "1px solid var(--comb)", padding: "4px 0 10px" }}>
       <div className="row" style={{ borderBottom: 0, paddingBottom: 0 }}>
         <div className="grow">
@@ -1686,7 +1711,7 @@ function App() {
         moveForm(t)
       ) : (
         <button className="ghost tiny mt8" onClick={() => setMoving({ ticket: t.ticket, toId: "", by: loadMyName(), note: "" })}>
-          Move to…
+          {typeof moveLabel === "string" ? moveLabel : "Move to…"}
         </button>
       )}
     </div>
@@ -1884,6 +1909,11 @@ function App() {
             </span>
           </button>
         ))}
+        <div className="cap mt16 mb6">Not paid yet?</div>
+        <button className="who" disabled={!note.trim()} onClick={() => checkout(INVOICE_ACCOUNT)}>
+          <b>Invoice — pay later</b>
+          <span>{note.trim() ? `to ${note.trim()}` : "write who it's for in the note first"}</span>
+        </button>
       </div>
     );
   }
@@ -2779,6 +2809,7 @@ function App() {
             {[
               ["Held by people", settleInfo.heldByPeople],
               ["Paid straight to common", settleInfo.common],
+              ...(settleInfo.invoiced ? [["Open invoices, not paid yet", settleInfo.invoiced]] : []),
               ...(settleInfo.unassigned ? [["Unassigned", settleInfo.unassigned]] : []),
             ].map(([label, v]) => (
               <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0", color: label === "Unassigned" ? "var(--clay)" : undefined }}>
@@ -2791,6 +2822,23 @@ function App() {
               <span className="num">{money(settleInfo.taken)}</span>
             </div>
           </div>
+
+          {settleInfo.invoiceTickets.length > 0 && (
+            <div className="settle" style={{ borderColor: "var(--honey)", background: "var(--honey-soft)" }}>
+              <div className="settle-head">
+                <div className="grow">
+                  <div className="t" style={{ fontSize: 17, fontWeight: 600 }}>
+                    Open invoices
+                  </div>
+                  <div className="s">Sold on invoice, not paid yet. When the money arrives, move each one to the account it came into.</div>
+                </div>
+                <div className="num" style={{ fontSize: 20, fontWeight: 600 }}>
+                  {money(settleInfo.invoiced)}
+                </div>
+              </div>
+              {settleInfo.invoiceTickets.map((t) => ticketRow(t, "Paid — into which account?"))}
+            </div>
+          )}
 
           {settleInfo.unassignedTickets.length > 0 && (
             <div className="settle" style={{ borderColor: "var(--clay)", background: "var(--clay-soft)" }}>
