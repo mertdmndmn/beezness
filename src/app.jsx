@@ -375,6 +375,10 @@ async function fetchAll() {
   }
   const c = await supabase.from("batches").select("countedTo").limit(1);
   if (c.error) out.missing.push("counts");
+  if (!out.missing.includes("expenses")) {
+    const e = await supabase.from("expenses").select("market").limit(1);
+    if (e.error) out.missing.push("expenses.market");
+  }
   return out;
 }
 
@@ -525,6 +529,12 @@ function App() {
   const [adminOpen, setAdminOpen] = useState([]); // product types expanded in Admin
   const openAdminType = (t) => setAdminOpen((o) => (o.includes(t) ? o : [...o, t]));
   const [statsView, setStatsView] = useState("chart"); // "chart" | "list"
+  const [statsSection, setStatsSection] = useState("products"); // products | markets | when | customers
+  const [statsRange, setStatsRange] = useState("all"); // all | 30 | 90 | year | custom
+  const [statsFrom, setStatsFrom] = useState("");
+  const [statsTo, setStatsTo] = useState("");
+  const [statsMetric, setStatsMetric] = useState("qty"); // qty | sum
+  const [packDays, setPackDays] = useState(1);
   const [statsOpen, setStatsOpen] = useState(null); // bar tapped open for its details
   const [settlingId, setSettlingId] = useState(null);
   const [payAmount, setPayAmount] = useState("");
@@ -541,6 +551,7 @@ function App() {
   const designsReady = missingTables && !missingTables.includes("designs");
   const designsPlus = designsReady && !missingTables.includes("designs+");
   const countsReady = missingTables && !missingTables.includes("counts");
+  const costMarketsReady = expensesReady && !missingTables.includes("expenses.market");
   const [armed, setArmed] = useState(null); // id whose × was tapped once; a second tap deletes
   const arm = (id, doIt) => {
     if (armed === id) {
@@ -1018,94 +1029,239 @@ function App() {
     };
   }, [data.sales, data.markets, reportDay, reportLoc]);
 
-  // Average sold per market day, for packing stock before the next market.
+  // ---- Stats ----
   // Markets are grouped by name, so a weekly market that's set up fresh each
   // time still adds up. A "day" is any day that market recorded a sale, and
-  // every product is divided by all of them — days it didn't sell count as 0.
+  // averages divide by all of them — days a product didn't sell count as 0.
   const marketNames = useMemo(
     () => [...new Set(reportMarkets.map((m) => m.name))].filter((n) => data.sales.some((s) => s.marketId && s.market === n)),
     [reportMarkets, data.sales]
   );
+  // Date range shared by every Stats section.
+  const statsSpan = useMemo(() => {
+    const now = new Date();
+    const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    if (statsRange === "30") return [startOf(now) - 29 * 864e5, Infinity];
+    if (statsRange === "90") return [startOf(now) - 89 * 864e5, Infinity];
+    if (statsRange === "year") return [new Date(now.getFullYear(), 0, 1).getTime(), Infinity];
+    if (statsRange === "custom") {
+      const from = statsFrom ? new Date(`${statsFrom}T00:00:00`).getTime() : -Infinity;
+      const to = statsTo ? new Date(`${statsTo}T23:59:59`).getTime() : Infinity;
+      return [from, to];
+    }
+    return [-Infinity, Infinity];
+  }, [statsRange, statsFrom, statsTo]);
+  const inSpan = (ts) => ts >= statsSpan[0] && ts <= statsSpan[1];
+
   const stats = useMemo(() => {
     // "everywhere" takes every sale, at markets or not; a day is then any
     // calendar day with a sale.
     const every = statsMarket === "everywhere";
-    const rows = data.sales.filter((s) => (every ? true : s.marketId && (statsMarket === "all" || s.market === statsMarket)));
+    const rows = data.sales.filter(
+      (s) => inSpan(s.ts) && (every ? true : s.marketId && (statsMarket === "all" || s.market === statsMarket))
+    );
     const dayOf = (s) => (every ? dayKey(s.ts) : `${s.marketId}|${dayKey(s.ts)}`);
     const days = new Set(rows.map(dayOf));
+    const n = days.size || 1;
     const byItem = {};
     const byProduct = {};
     const byDesign = {};
     const byDay = {};
+    const tickets = {};
     const tally = (map, key, init, s) => {
       const it = (map[key] = map[key] || { key, qty: 0, sum: 0, perDay: {}, ...init });
       it.qty += s.qty;
       it.sum += s.qty * s.price;
       it.perDay[dayOf(s)] = (it.perDay[dayOf(s)] || 0) + s.qty;
     };
+    let giftUnits = 0;
+    let giftValue = 0;
+    let discount = 0;
     rows.forEach((s) => {
       const day = (byDay[dayOf(s)] = byDay[dayOf(s)] || { key: dayOf(s), ts: s.ts, sum: 0, units: 0 });
       day.ts = Math.min(day.ts, s.ts);
       day.sum += s.qty * s.price;
+      const t = (tickets[s.ticket] = tickets[s.ticket] || { ts: s.ts, sum: 0, units: 0, pids: new Set() });
+      t.sum += s.qty * s.price;
       if (s.pid === TIP_PID) return;
       day.units += s.qty;
-      tally(byProduct, s.pid, { pid: s.pid, name: (data.products.find((p) => p.id === s.pid) || s).name }, s);
-      if (s.designId) {
-        const d = data.designs.find((x) => x.id === s.designId);
-        tally(byDesign, s.designId, { name: d ? d.name : s.design || "Design", photo: d ? d.photo : null }, s);
-      }
+      t.units += s.qty;
+      t.pids.add(s.pid);
+      if (s.mode === "gift") {
+        giftUnits += s.qty;
+        giftValue += s.qty * s.list;
+      } else if (s.price < s.list) discount += s.qty * (s.list - s.price);
       // Each design counts on its own, so the best-selling candle shows up.
-      const key = `${s.pid}|${s.designId || ""}`;
       const design = s.designId && data.designs.find((x) => x.id === s.designId);
-      const it = (byItem[key] = byItem[key] || { key, name: s.name, photo: design ? design.photo : null, qty: 0, sum: 0, perDay: {} });
-      const d = dayOf(s);
-      it.qty += s.qty;
-      it.sum += s.qty * s.price;
-      it.perDay[d] = (it.perDay[d] || 0) + s.qty;
+      tally(byItem, `${s.pid}|${s.designId || ""}`, { name: s.name, photo: design ? design.photo : null }, s);
+      tally(byProduct, s.pid, { pid: s.pid, name: (data.products.find((p) => p.id === s.pid) || s).name }, s);
+      if (s.designId) tally(byDesign, s.designId, { name: design ? design.name : s.design || "Design", photo: design ? design.photo : null }, s);
     });
-    const n = days.size || 1;
     const ranked = (map) =>
       Object.values(map)
-        .map((it) => ({ ...it, avg: it.qty / n, best: Math.max(...Object.values(it.perDay)) }))
+        .map((it) => ({ ...it, avg: it.qty / n, avgSum: it.sum / n, best: Math.max(...Object.values(it.perDay)) }))
         .sort((a, b) => b.avg - a.avg || byName(a, b));
-    const items = ranked(byItem);
+    const products = ranked(byProduct);
+
+    // Customers: one sale (ticket) is one customer. Tip-only tickets aren't.
+    const custs = Object.values(tickets).filter((t) => t.units > 0);
+    const pairCount = {};
+    custs.forEach((t) => {
+      const ids = [...t.pids].sort();
+      for (let i = 0; i < ids.length; i++)
+        for (let j = i + 1; j < ids.length; j++) pairCount[`${ids[i]}|${ids[j]}`] = (pairCount[`${ids[i]}|${ids[j]}`] || 0) + 1;
+    });
+    const nameOf = (pid) => (data.products.find((p) => p.id === pid) || {}).name || "Removed product";
+    const pairs = Object.entries(pairCount)
+      .filter(([, c]) => c >= 2)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([k, c]) => ({ key: k, a: nameOf(k.split("|")[0]), b: nameOf(k.split("|")[1]), count: c }));
+
+    // When: customers per clock hour, and takings per weekday, both as an
+    // average over the days that had any sales (in that hour's case, all).
+    const hours = Array.from({ length: 24 }, (_, h) => ({ h, customers: 0, sum: 0 }));
+    custs.forEach((t) => {
+      const h = new Date(t.ts).getHours();
+      hours[h].customers += 1;
+      hours[h].sum += t.sum;
+    });
+    const used = hours.filter((x) => x.customers > 0).map((x) => x.h);
+    const hourRange = used.length ? hours.slice(Math.min(...used), Math.max(...used) + 1) : [];
+    const weekdays = [1, 2, 3, 4, 5, 6, 0].map((wd) => {
+      const ds = Object.values(byDay).filter((d) => new Date(d.ts).getDay() === wd);
+      return { wd, days: ds.length, avg: ds.length ? ds.reduce((t, d) => t + d.sum, 0) / ds.length : 0 };
+    });
+
+    // Sizes: products sharing a name apart from size, when there's > 1 size.
+    const families = {};
+    products.forEach((it) => (families[familyOf(it.name)] = families[familyOf(it.name)] || []).push(it));
+    const sizes = Object.values(families)
+      .filter((f) => f.length > 1)
+      .map((f) => ({ name: f[0].name.replace(/\d+([.,]\d+)?\s*(kg|g|gr|ml|cl|l)?\b\.?/gi, "").trim(), items: [...f].sort(byName) }));
+
     return {
       days: days.size,
-      items,
-      products: ranked(byProduct),
+      items: ranked(byItem),
+      products,
       designs: ranked(byDesign),
       trend: Object.values(byDay).sort((a, b) => a.ts - b.ts),
+      total: rows.reduce((t, s) => t + s.qty * s.price, 0),
       avgTakings: rows.reduce((t, s) => t + s.qty * s.price, 0) / n,
       avgUnits: unitsOf(rows) / n,
+      customers: custs.length,
+      avgSpend: custs.length ? custs.reduce((t, c) => t + c.sum, 0) / custs.length : 0,
+      avgItems: custs.length ? custs.reduce((t, c) => t + c.units, 0) / custs.length : 0,
+      pairs,
+      hourRange,
+      weekdays,
+      sizes,
+      giftUnits,
+      giftValue,
+      discount,
     };
-  }, [data.sales, data.designs, data.products, statsMarket]);
+  }, [data.sales, data.designs, data.products, statsMarket, statsSpan]);
+
+  // Markets side by side, for the chosen dates. Costs are expenses tagged
+  // with that market (stand fee, fuel); "kept" is takings minus them.
+  const marketCompare = useMemo(() => {
+    const m = {};
+    data.sales.forEach((s) => {
+      if (!s.marketId || !inSpan(s.ts)) return;
+      const it = (m[s.market] = m[s.market] || { name: s.market, days: new Set(), sum: 0, units: 0, tickets: new Set(), given: 0, costs: 0 });
+      it.days.add(`${s.marketId}|${dayKey(s.ts)}`);
+      it.sum += s.qty * s.price;
+      if (s.pid !== TIP_PID) {
+        it.units += s.qty;
+        it.tickets.add(s.ticket);
+        it.given += s.qty * Math.max(0, s.list - s.price);
+      }
+    });
+    data.expenses.forEach((e) => {
+      if (e.market && m[e.market] && inSpan(e.ts)) m[e.market].costs += Number(e.amount) || 0;
+    });
+    return Object.values(m)
+      .map((it) => {
+        const d = it.days.size || 1;
+        return { ...it, days: it.days.size, perDay: it.sum / d, unitsPerDay: it.units / d, custPerDay: it.tickets.size / d, kept: it.sum - it.costs };
+      })
+      .sort((a, b) => b.perDay - a.perDay);
+  }, [data.sales, data.expenses, statsSpan]);
+
+  // Packing checklist ticks live on this phone only, per market choice.
+  const packKey = `honey-till-pack-${statsMarket}`;
+  const [packTicks, setPackTicks] = useState({});
+  useEffect(() => {
+    try {
+      setPackTicks(JSON.parse(localStorage.getItem(packKey) || "{}"));
+    } catch {
+      setPackTicks({});
+    }
+  }, [packKey]);
+  const togglePack = (pid) => {
+    const next = { ...packTicks, [pid]: !packTicks[pid] };
+    setPackTicks(next);
+    try {
+      localStorage.setItem(packKey, JSON.stringify(next));
+    } catch {}
+  };
+  const clearPack = () => {
+    setPackTicks({});
+    try {
+      localStorage.removeItem(packKey);
+    } catch {}
+  };
+
   const [trendOpen, setTrendOpen] = useState(null);
-  // Ranked horizontal bars: average sold per day, tap a bar for details.
-  const statBars = (list) => (
-    <div className="bars">
-      {list.map((it) => {
-        const max = list[0].avg || 1;
-        const open = statsOpen === it.key;
-        return (
-          <button key={it.key} className="bar" onClick={() => setStatsOpen(open ? null : it.key)}>
-            <span className="bar-label">
-              {it.photo && <img className="thumb" src={it.photo} alt="" />}
-              <span className="grow">{it.name}</span>
-              <span className="num">{avgStr(it.avg)}</span>
-            </span>
-            <span className="bar-track">
-              <span className="bar-fill" style={{ width: `${Math.max(1.5, (it.avg / max) * 100)}%` }} />
-            </span>
-            {open && (
-              <span className="bar-more">
-                {it.qty} sold in {stats.days} {stats.days === 1 ? "day" : "days"} · best day {it.best} · CHF {money(it.sum)}
+  const [hourOpen, setHourOpen] = useState(null);
+  const [weekOpen, setWeekOpen] = useState(null);
+  const metricOf = (it) => (statsMetric === "sum" ? it.avgSum : it.avg);
+  const metricStr = (it) => (statsMetric === "sum" ? money(it.avgSum) : avgStr(it.avg));
+  // Ranked horizontal bars: average per day, tap a bar for details.
+  const statBars = (list) => {
+    const sorted = [...list].sort((a, b) => metricOf(b) - metricOf(a));
+    const max = sorted.length ? metricOf(sorted[0]) || 1 : 1;
+    return (
+      <div className="bars">
+        {sorted.map((it) => {
+          const open = statsOpen === it.key;
+          return (
+            <button key={it.key} className="bar" onClick={() => setStatsOpen(open ? null : it.key)}>
+              <span className="bar-label">
+                {it.photo && <img className="thumb" src={it.photo} alt="" />}
+                <span className="grow">{it.name}</span>
+                <span className="num">{metricStr(it)}</span>
               </span>
-            )}
+              <span className="bar-track">
+                <span className="bar-fill" style={{ width: `${Math.max(1.5, (metricOf(it) / max) * 100)}%` }} />
+              </span>
+              {open && (
+                <span className="bar-more">
+                  {it.qty} sold in {stats.days} {stats.days === 1 ? "day" : "days"} · best day {it.best} · CHF {money(it.sum)}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+  // Vertical columns (trend, hours, weekdays): tap one to read its value.
+  const columns = (list, { value, label, open, onOpen, height = 110 }) => {
+    const max = Math.max(...list.map(value)) || 1;
+    return (
+      <div className="trend">
+        {list.map((x, i) => (
+          <button key={i} className="col" data-on={open === i ? "1" : "0"} onClick={() => onOpen(open === i ? null : i)}>
+            <span className="col-track" style={{ height }}>
+              <span className="col-fill" style={{ height: `${value(x) > 0 ? Math.max(2, (value(x) / max) * 100) : 0}%` }} />
+            </span>
+            <span className="col-label">{label(x)}</span>
           </button>
-        );
-      })}
-    </div>
-  );
+        ))}
+      </div>
+    );
+  };
   const avgStr = (n) => (Math.round(n * 10) / 10).toString();
 
   // Every sale lands in exactly one bucket — a person, the common account,
@@ -1688,7 +1844,7 @@ function App() {
     const today = new Date();
     const picked = expDraft.date ? new Date(`${expDraft.date}T12:00:00`) : today;
     const ts = picked.toDateString() === today.toDateString() ? Date.now() : picked.getTime();
-    const row = { id: uid(), ts, paidBy, what, amount: round2(amt), repaidAt: null };
+    const row = { id: uid(), ts, paidBy, what, amount: round2(amt), repaidAt: null, ...(costMarketsReady && { market: expDraft.market || null }) };
     save({ expenses: [row, ...data.expenses] }, [{ table: "expenses", type: "insert", id: row.id, row }]);
     saveMyName(paidBy);
     setExpDraft(null);
@@ -3248,135 +3404,358 @@ function App() {
 
       {tab === "stats" && (
         <>
-          <div className="cap mb6">Market</div>
-          <select value={statsMarket} onChange={(e) => setStatsMarket(e.target.value)}>
-            <option value="all">All markets</option>
-            <option value="everywhere">All sales, every place</option>
-            {marketNames.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
+          <div className="two">
+            <div>
+              <div className="cap mb6">Market</div>
+              <select value={statsMarket} onChange={(e) => setStatsMarket(e.target.value)}>
+                <option value="all">All markets</option>
+                <option value="everywhere">All sales, every place</option>
+                {marketNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div className="cap mb6">Dates</div>
+              <select value={statsRange} onChange={(e) => setStatsRange(e.target.value)}>
+                <option value="all">All time</option>
+                <option value="30">Last 30 days</option>
+                <option value="90">Last 90 days</option>
+                <option value="year">This year</option>
+                <option value="custom">Pick dates…</option>
+              </select>
+            </div>
+          </div>
+          {statsRange === "custom" && (
+            <div className="two">
+              <input type="date" value={statsFrom} onChange={(e) => setStatsFrom(e.target.value)} aria-label="From" />
+              <input type="date" value={statsTo} onChange={(e) => setStatsTo(e.target.value)} aria-label="To" />
+            </div>
+          )}
 
-          {stats.days === 0 ? (
-            <div className="empty">No market sales yet. Start a market day from the Sell tab and the averages show up here.</div>
+          <div className="seg">
+            {[
+              ["products", "Products"],
+              ["markets", "Markets"],
+              ["when", "When"],
+              ["customers", "Customers"],
+            ].map(([id, label]) => (
+              <button key={id} data-on={statsSection === id ? "1" : "0"} onClick={() => setStatsSection(id)}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {statsSection === "markets" ? (
+            marketCompare.length === 0 ? (
+              <div className="empty">No market sales in these dates.</div>
+            ) : (
+              <>
+                <div className="empty pt0" style={{ margin: "0 0 6px" }}>
+                  Best takings per day first. Tag stand fees and fuel with the market in Costs to see what you kept.
+                </div>
+                {marketCompare.map((m) => (
+                  <div className="mcard" key={m.name}>
+                    <div className="mcard-head">
+                      <b>{m.name}</b>
+                      <span className="cap">
+                        {m.days} {m.days === 1 ? "day" : "days"}
+                      </span>
+                    </div>
+                    <div className="mcard-grid">
+                      <div>
+                        <div className="cap">CHF / day</div>
+                        <div className="num">{money(m.perDay)}</div>
+                      </div>
+                      <div>
+                        <div className="cap">Items / day</div>
+                        <div className="num">{avgStr(m.unitsPerDay)}</div>
+                      </div>
+                      <div>
+                        <div className="cap">Customers / day</div>
+                        <div className="num">{avgStr(m.custPerDay)}</div>
+                      </div>
+                      <div>
+                        <div className="cap">Takings</div>
+                        <div className="num">{money(m.sum)}</div>
+                      </div>
+                      <div>
+                        <div className="cap">Costs</div>
+                        <div className="num">{m.costs ? money(m.costs) : "–"}</div>
+                      </div>
+                      <div>
+                        <div className="cap">Kept</div>
+                        <div className="num">{money(m.kept)}</div>
+                      </div>
+                    </div>
+                    {m.given > 0 && <div className="mcard-foot">Given away (gifts and discounts, at list price): CHF {money(m.given)}</div>}
+                  </div>
+                ))}
+              </>
+            )
+          ) : stats.days === 0 ? (
+            <div className="empty">No sales here in these dates. Try a different market or "All time".</div>
           ) : (
             <>
-              <div className="stat mt12">
-                <div>
-                  <div className="cap">{statsMarket === "everywhere" ? "Days" : "Market days"}</div>
-                  <div className="n">{stats.days}</div>
+              {stats.days < 5 && (
+                <div className="empty pt0" style={{ margin: "0 0 8px" }}>
+                  Based on only {stats.days} {stats.days === 1 ? "day" : "days"}, so the averages will still move a lot.
                 </div>
-                <div>
-                  <div className="cap">CHF / day</div>
-                  <div className="n">{money(stats.avgTakings)}</div>
-                </div>
-                <div>
-                  <div className="cap">Items / day</div>
-                  <div className="n">{avgStr(stats.avgUnits)}</div>
-                </div>
-              </div>
-
-              {stats.trend.length > 1 && (
-                <>
-                  <hr className="rule" />
-                  <div className="cap">Takings per {statsMarket === "everywhere" ? "day" : "market day"}</div>
-                  <div className="trend">
-                    {stats.trend.map((d) => {
-                      const max = Math.max(...stats.trend.map((x) => x.sum)) || 1;
-                      return (
-                        <button key={d.key} className="col" data-on={trendOpen === d.key ? "1" : "0"} onClick={() => setTrendOpen(trendOpen === d.key ? null : d.key)}>
-                          <span className="col-track">
-                            <span className="col-fill" style={{ height: `${Math.max(2, (d.sum / max) * 100)}%` }} />
-                          </span>
-                          <span className="col-label">{shortDate(d.ts)}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {(() => {
-                    const d = stats.trend.find((x) => x.key === trendOpen);
-                    return (
-                      <div className="empty pt0">
-                        {d
-                          ? `${new Date(d.ts).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", year: "numeric" })}${
-                              d.key.includes("|") ? ` · ${(data.markets.find((m) => m.id === d.key.split("|")[0]) || {}).name || "Market"}` : ""
-                            } · CHF ${money(d.sum)} · ${d.units} items`
-                          : "Oldest on the left. Tap a bar for that day."}
-                      </div>
-                    );
-                  })()}
-                </>
               )}
 
-              <hr className="rule" />
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <div className="cap">Average per day, by product</div>
-                <div className="seg" style={{ margin: 0 }}>
-                  {[
-                    ["chart", "Chart"],
-                    ["list", "List"],
-                  ].map(([id, label]) => (
-                    <button key={id} data-on={statsView === id ? "1" : "0"} onClick={() => setStatsView(id)}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {statsView === "chart" && (
+              {statsSection === "products" && (
                 <>
-                  {statBars(stats.items)}
-                  <div className="empty">Bars show the average sold per day. Tap one for details.</div>
-                </>
-              )}
-              {statsView === "list" && stats.items.map((it) => (
-                <div className="row" key={it.key}>
-                  {it.photo && <img className="thumb" src={it.photo} alt="" />}
-                  <div className="grow">
-                    <div className="t">{it.name}</div>
-                    <div className="s">
-                      {it.qty} sold in {stats.days} {stats.days === 1 ? "day" : "days"} · best day {it.best}
+                  <div className="stat">
+                    <div>
+                      <div className="cap">{statsMarket === "everywhere" ? "Days" : "Market days"}</div>
+                      <div className="n">{stats.days}</div>
+                    </div>
+                    <div>
+                      <div className="cap">CHF / day</div>
+                      <div className="n">{money(stats.avgTakings)}</div>
+                    </div>
+                    <div>
+                      <div className="cap">Items / day</div>
+                      <div className="n">{avgStr(stats.avgUnits)}</div>
                     </div>
                   </div>
-                  <div className="v">{avgStr(it.avg)} / day</div>
-                </div>
-              ))}
-              {stats.designs.length > 0 && (
-                <>
-                  <hr className="rule" />
-                  <div className="cap">Designs, all sizes together</div>
-                  {statBars(stats.designs)}
-                </>
-              )}
 
-              {statsMarket !== "everywhere" && (
-                <>
-                  <hr className="rule" />
-                  <div className="cap">Packing list for next time</div>
-                  <div className="empty pt0" style={{ margin: "2px 0 4px" }}>
-                    Bring what sold on the best day{statsMarket === "all" ? " at any market" : ` at ${statsMarket}`}, so you shouldn't run out.
-                  </div>
-                  {stats.products.map((it) => {
-                    const have = Math.max(0, stockOf(it.pid));
-                    const short = it.best - have;
-                    return (
-                      <div className="row" key={it.key}>
-                        <div className="grow">
-                          <div className="t">{it.name}</div>
-                          <div className="s">
-                            {have} in stock
-                            {short > 0 && <span className="lowtag"> · {short} short</span>}
-                          </div>
-                        </div>
-                        <div className="v">bring {it.best}</div>
+                  {stats.trend.length > 1 && (
+                    <>
+                      <hr className="rule" />
+                      <div className="cap">Takings per {statsMarket === "everywhere" ? "day" : "market day"}</div>
+                      {columns(stats.trend, { value: (d) => d.sum, label: (d) => shortDate(d.ts), open: trendOpen, onOpen: setTrendOpen })}
+                      <div className="empty pt0">
+                        {trendOpen !== null && stats.trend[trendOpen]
+                          ? (() => {
+                              const d = stats.trend[trendOpen];
+                              const mk = d.key.includes("|") ? (data.markets.find((m) => m.id === d.key.split("|")[0]) || {}).name : null;
+                              return `${new Date(d.ts).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })}${mk ? ` · ${mk}` : ""} · CHF ${money(d.sum)} · ${d.units} items`;
+                            })()
+                          : "Oldest on the left. Tap a bar for that day."}
                       </div>
-                    );
-                  })}
+                    </>
+                  )}
+
+                  <hr className="rule" />
+                  <div className="stats-head">
+                    <div className="cap">Average per day</div>
+                    <div className="seg mini">
+                      {[
+                        ["qty", "Items"],
+                        ["sum", "CHF"],
+                      ].map(([id, label]) => (
+                        <button key={id} data-on={statsMetric === id ? "1" : "0"} onClick={() => setStatsMetric(id)}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="seg mini">
+                      {[
+                        ["chart", "Chart"],
+                        ["list", "List"],
+                      ].map(([id, label]) => (
+                        <button key={id} data-on={statsView === id ? "1" : "0"} onClick={() => setStatsView(id)}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {statsView === "chart" ? (
+                    <>
+                      {statBars(stats.items)}
+                      <div className="empty pt0">Tap a bar for details.</div>
+                    </>
+                  ) : (
+                    [...stats.items]
+                      .sort((a, b) => metricOf(b) - metricOf(a))
+                      .map((it) => (
+                        <div className="row" key={it.key}>
+                          {it.photo && <img className="thumb" src={it.photo} alt="" />}
+                          <div className="grow">
+                            <div className="t">{it.name}</div>
+                            <div className="s">
+                              {it.qty} sold · CHF {money(it.sum)} · best day {it.best}
+                            </div>
+                          </div>
+                          <div className="v">{metricStr(it)} / day</div>
+                        </div>
+                      ))
+                  )}
+
+                  {stats.designs.length > 0 && (
+                    <>
+                      <hr className="rule" />
+                      <div className="cap">Designs, all sizes together</div>
+                      {statBars(stats.designs)}
+                    </>
+                  )}
+
+                  {stats.sizes.length > 0 && (
+                    <>
+                      <hr className="rule" />
+                      <div className="cap">Sizes compared</div>
+                      {stats.sizes.map((f) => {
+                        const units = f.items.reduce((t, x) => t + x.qty, 0) || 1;
+                        const chf = f.items.reduce((t, x) => t + x.sum, 0) || 1;
+                        return (
+                          <div className="sizes" key={f.name}>
+                            <div className="t">{f.name}</div>
+                            {f.items.map((x) => (
+                              <div className="size-row" key={x.key}>
+                                <span className="grow">{x.name}</span>
+                                <span className="num">{Math.round((x.qty / units) * 100)}% of jars</span>
+                                <span className="num">{Math.round((x.sum / chf) * 100)}% of CHF</span>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+
+                  {(stats.giftUnits > 0 || stats.discount > 0) && (
+                    <>
+                      <hr className="rule" />
+                      <div className="cap">Given away</div>
+                      <div className="row">
+                        <div className="grow t">Gifts · {stats.giftUnits} items at list price</div>
+                        <div className="v">{money(stats.giftValue)}</div>
+                      </div>
+                      <div className="row">
+                        <div className="grow t">Discounts off list price</div>
+                        <div className="v">{money(stats.discount)}</div>
+                      </div>
+                    </>
+                  )}
+
+                  {statsMarket !== "everywhere" && (
+                    <>
+                      <hr className="rule" />
+                      <div className="stats-head">
+                        <div className="cap">Packing list</div>
+                        <div className="seg mini">
+                          {[1, 2, 3].map((d) => (
+                            <button key={d} data-on={packDays === d ? "1" : "0"} onClick={() => setPackDays(d)}>
+                              {d} {d === 1 ? "day" : "days"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="empty pt0" style={{ margin: "2px 0 4px" }}>
+                        Best day{packDays > 1 ? ` plus ${packDays - 1} average ${packDays === 2 ? "day" : "days"}` : ""}
+                        {statsMarket === "all" ? " at any market" : ` at ${statsMarket}`}. Tap to tick off while packing; "lasts" is how many market days your stock covers.
+                      </div>
+                      {stats.products.map((it) => {
+                        const bring = Math.ceil(it.best + it.avg * (packDays - 1));
+                        const have = Math.max(0, stockOf(it.pid));
+                        const short = bring - have;
+                        const lasts = it.avg > 0 ? have / it.avg : null;
+                        return (
+                          <button className="pack" data-on={packTicks[it.pid] ? "1" : "0"} key={it.key} onClick={() => togglePack(it.pid)}>
+                            <span className="tick">{packTicks[it.pid] ? "✓" : ""}</span>
+                            <span className="grow">
+                              <span className="t">{it.name}</span>
+                              <span className="s">
+                                {have} in stock
+                                {lasts !== null && ` · lasts ~${lasts >= 10 ? Math.round(lasts) : avgStr(lasts)} days`}
+                                {short > 0 && <span className="lowtag"> · {short} short</span>}
+                              </span>
+                            </span>
+                            <span className="v">bring {bring}</span>
+                          </button>
+                        );
+                      })}
+                      {Object.values(packTicks).some(Boolean) && (
+                        <button className="ghost tiny wide mt8" onClick={clearPack}>
+                          Untick everything
+                        </button>
+                      )}
+                    </>
+                  )}
+                  <div className="empty">Counts every item that left the stall, gifts included. Tips are left out.</div>
                 </>
               )}
 
-              <div className="empty">Counts every item that left the stall, gifts included. Tips are left out.</div>
+              {statsSection === "when" && (
+                <>
+                  {stats.hourRange.length > 0 && (
+                    <>
+                      <div className="cap">Customers per hour, on an average day</div>
+                      {columns(stats.hourRange, {
+                        value: (x) => x.customers / stats.days,
+                        label: (x) => `${x.h}h`,
+                        open: hourOpen,
+                        onOpen: setHourOpen,
+                      })}
+                      <div className="empty pt0">
+                        {hourOpen !== null && stats.hourRange[hourOpen]
+                          ? (() => {
+                              const x = stats.hourRange[hourOpen];
+                              return `${x.h}:00–${x.h + 1}:00 · ${avgStr(x.customers / stats.days)} customers · CHF ${money(x.sum / stats.days)} on an average day`;
+                            })()
+                          : "Tap a bar for that hour. Busy hours are when you want two people at the stall."}
+                      </div>
+                    </>
+                  )}
+                  <hr className="rule" />
+                  <div className="cap">Takings by weekday, on average</div>
+                  {columns(stats.weekdays, {
+                    value: (x) => x.avg,
+                    label: (x) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][x.wd],
+                    open: weekOpen,
+                    onOpen: setWeekOpen,
+                  })}
+                  <div className="empty pt0">
+                    {weekOpen !== null && stats.weekdays[weekOpen]
+                      ? (() => {
+                          const x = stats.weekdays[weekOpen];
+                          const name = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][x.wd];
+                          return x.days ? `${name} · CHF ${money(x.avg)} on average · ${x.days} ${x.days === 1 ? "day" : "days"}` : `${name} · no sales yet`;
+                        })()
+                      : "Tap a bar for that weekday."}
+                  </div>
+                </>
+              )}
+
+              {statsSection === "customers" && (
+                <>
+                  <div className="stat">
+                    <div>
+                      <div className="cap">Customers</div>
+                      <div className="n">{stats.customers}</div>
+                    </div>
+                    <div>
+                      <div className="cap">CHF each</div>
+                      <div className="n">{money(stats.avgSpend)}</div>
+                    </div>
+                    <div>
+                      <div className="cap">Items each</div>
+                      <div className="n">{avgStr(stats.avgItems)}</div>
+                    </div>
+                  </div>
+                  <div className="empty pt0" style={{ margin: "6px 0 0" }}>
+                    One sale is one customer. {avgStr(stats.customers / stats.days)} customers on an average day.
+                  </div>
+                  <hr className="rule" />
+                  <div className="cap">Often bought together</div>
+                  {stats.pairs.length === 0 ? (
+                    <div className="empty">No two products bought together more than once yet.</div>
+                  ) : (
+                    stats.pairs.map((x) => (
+                      <div className="row" key={x.key}>
+                        <div className="grow t">
+                          {x.a} + {x.b}
+                        </div>
+                        <div className="v">{x.count}×</div>
+                      </div>
+                    ))
+                  )}
+                  {stats.pairs.length > 0 && <div className="empty pt0">Good candidates for a Box or a "take both" price.</div>}
+                </>
+              )}
             </>
           )}
         </>
@@ -3641,6 +4020,16 @@ function App() {
                   style={{ flex: 1, minWidth: 0, fontFamily: "'Barlow',sans-serif" }}
                 />
               </div>
+              {costMarketsReady && (
+                <select value={expDraft.market || ""} onChange={(e) => setExpDraft({ ...expDraft, market: e.target.value })} style={{ width: "100%", marginTop: 7 }}>
+                  <option value="">Not for a market</option>
+                  {[...new Set(reportMarkets.map((m) => m.name))].map((n) => (
+                    <option key={n} value={n}>
+                      For {n} (stand fee, fuel…)
+                    </option>
+                  ))}
+                </select>
+              )}
               <div className="payrow">
                 <button
                   className="ghost solid wide"
@@ -3696,6 +4085,7 @@ function App() {
                     <div className="t">{e.what}</div>
                     <div className="s">
                       {e.paidBy} · {shortDate(e.ts)}
+                      {e.market ? ` · ${e.market}` : ""}
                       {e.repaidAt ? ` · paid back ${shortDate(e.repaidAt)}` : ""}
                     </div>
                   </div>

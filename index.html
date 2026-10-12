@@ -107,11 +107,34 @@ h2{font-family:'Sora',sans-serif;font-weight:600;font-size:17px;line-height:1.2;
 .dstock-row .nophoto{display:flex;align-items:center;justify-content:center;color:var(--soft)}
 .trend{display:flex;gap:6px;align-items:flex-end;overflow-x:auto;padding:10px 0 2px;scrollbar-width:none}
 .trend::-webkit-scrollbar{display:none}
-.col{flex:1 0 34px;max-width:64px;display:flex;flex-direction:column;align-items:stretch;gap:5px;background:none;border:0;padding:0;cursor:pointer}
+.col{flex:1 1 0;min-width:22px;max-width:64px;display:flex;flex-direction:column;align-items:stretch;gap:5px;background:none;border:0;padding:0;cursor:pointer}
 .col-track{height:120px;display:flex;align-items:flex-end}
 .col-fill{display:block;width:100%;background:var(--honey);border-radius:4px 4px 0 0;opacity:.75}
 .col[data-on="1"] .col-fill{opacity:1}
 .col-label{font-size:10.5px;color:var(--soft);text-align:center;white-space:nowrap}
+.seg.mini{margin:0;padding:3px;flex:none}
+.seg.mini button{min-height:30px;padding:0 10px;font-size:12px;flex:none}
+.stats-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stats-head .cap{flex:1;min-width:120px}
+.mcard{background:var(--card);border:1px solid var(--comb);border-radius:14px;padding:12px 13px;margin-bottom:10px}
+.mcard-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:8px}
+.mcard-head b{font-family:'Sora',sans-serif;font-size:15.5px}
+.mcard-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 10px}
+.mcard-grid .num{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14.5px;margin-top:2px;font-variant-numeric:tabular-nums}
+.mcard-foot{font-size:12.5px;color:var(--soft);margin-top:9px}
+.sizes{padding:8px 0;border-bottom:1px solid var(--comb)}
+.sizes .t{font-weight:600;font-size:14.5px;margin-bottom:4px}
+.size-row{display:flex;gap:10px;font-size:13px;padding:2px 0}
+.size-row .grow{flex:1;min-width:0}
+.size-row .num{font-family:'IBM Plex Mono',monospace;color:var(--soft);white-space:nowrap;font-size:12px}
+.pack{display:flex;align-items:center;gap:11px;width:100%;background:none;border:0;border-bottom:1px solid var(--comb);padding:10px 0;text-align:left;cursor:pointer;font:inherit;color:inherit}
+.pack .grow{flex:1;min-width:0;display:flex;flex-direction:column}
+.pack .t{font-size:14.5px}
+.pack .s{font-size:12px;color:var(--soft);margin-top:2px}
+.pack .v{font-family:'IBM Plex Mono',monospace;font-weight:600;white-space:nowrap}
+.pack .tick{width:24px;height:24px;flex:none;border-radius:7px;border:1.5px solid var(--comb);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:700}
+.pack[data-on="1"] .tick{background:var(--sage);border-color:var(--sage)}
+.pack[data-on="1"] .t,.pack[data-on="1"] .v{text-decoration:line-through;color:var(--soft)}
 .row .thumb{width:38px;height:38px;border-radius:8px;object-fit:cover;flex:none}
 .tile .inbag{position:absolute;top:-8px;right:-8px;background:var(--honey);border:0;color:#fff;
   border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;
@@ -220,7 +243,7 @@ input.mini{width:78px;min-width:0;padding:9px;text-align:right}
 </head>
 <body>
 <div id="root"></div>
-<script src="app.js?v=64453e97e7"></script>
+<script src="app.js?v=3b25d339bd"></script>
 <script>
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(function(){});

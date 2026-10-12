@@ -204,3 +204,7 @@ alter table batches add column if not exists "designId" text;
 -- the latest count plus batches and sales after it, so a sale that syncs
 -- late from an offline phone isn't counted twice. Additive; safe to run.
 alter table batches add column if not exists "countedTo" numeric;
+
+-- Which market a cost belongs to (stand fee, fuel), by market name, so
+-- Stats can show what each market actually kept. Additive; safe to run.
+alter table expenses add column if not exists market text;
