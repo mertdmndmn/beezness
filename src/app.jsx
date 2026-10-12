@@ -3062,28 +3062,6 @@ function App() {
 
           {basketPanel}
 
-          <hr className="rule" />
-          <div className="cap">Today at {locationName(activeLoc)}</div>
-          {today.list.length === 0 && <div className="empty">Nothing sold here yet today.</div>}
-          {foldSales(today.list).shown.map((s) => (
-            <div className="row" key={s.id}>
-              <div className="grow">
-                <div className="t">
-                  {s.pid === TIP_PID ? "Tip" : `${s.qty}× ${s.name}`}
-                  {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
-                </div>
-                <div className="s">
-                  {timeStr(s.ts)} · {s.account}
-                  {s.note ? ` · ${s.note}` : ""}
-                </div>
-              </div>
-              <div className="v">{money(s.qty * s.price)}</div>
-              <button className="x" onClick={() => deleteTicket(s.ticket)} aria-label="Delete this sale">
-                ×
-              </button>
-            </div>
-          ))}
-          {salesToggle(foldSales(today.list).hidden)}
         </>
       )}
 
@@ -3204,6 +3182,43 @@ function App() {
               <div className="v">{money(v.sum)}</div>
             </div>
           ))}
+
+          {/* Every sale in the chosen day/market/place, newest first, so a
+              wrong one can be found and deleted (two taps). */}
+          {report.rows.length > 0 && (() => {
+            const newest = [...report.rows].sort((a, b) => b.ts - a.ts);
+            const folded = foldSales(newest);
+            return (
+              <>
+                <div className="cap mt16">Sales</div>
+                {folded.shown.map((s) => (
+                  <div className="row" key={s.id}>
+                    <div className="grow">
+                      <div className="t">
+                        {s.pid === TIP_PID ? "Tip" : `${s.qty}× ${s.name}`}
+                        {s.mode === "gift" ? " · gift" : s.price < s.list ? " · reduced" : ""}
+                      </div>
+                      <div className="s">
+                        {report.multiDay ? `${shortDate(s.ts)} ` : ""}
+                        {timeStr(s.ts)} · {s.account}
+                        {reportLoc === "all" ? ` · ${s.location}` : ""}
+                        {s.note ? ` · ${s.note}` : ""}
+                      </div>
+                    </div>
+                    <div className="v">{money(s.qty * s.price)}</div>
+                    <button
+                      className={armed === s.ticket ? "armed" : "x"}
+                      onClick={() => arm(s.ticket, () => deleteTicket(s.ticket))}
+                      aria-label="Delete this sale"
+                    >
+                      {armed === s.ticket ? "Delete?" : "×"}
+                    </button>
+                  </div>
+                ))}
+                {salesToggle(folded.hidden)}
+              </>
+            );
+          })()}
 
           <hr className="rule" />
           <div className="cap">Stock on hand</div>
