@@ -504,6 +504,8 @@ function App() {
   const [reportDay, setReportDay] = useState(() => dayKey(Date.now()));
   const [reportLoc, setReportLoc] = useState("all");
   const [statsMarket, setStatsMarket] = useState("all");
+  const [adminOpen, setAdminOpen] = useState([]); // product types expanded in Admin
+  const openAdminType = (t) => setAdminOpen((o) => (o.includes(t) ? o : [...o, t]));
   const [statsView, setStatsView] = useState("chart"); // "chart" | "list"
   const [statsOpen, setStatsOpen] = useState(null); // bar tapped open for its details
   const [settlingId, setSettlingId] = useState(null);
@@ -3415,7 +3417,18 @@ function App() {
           </button>
           <h2>Products</h2>
           <div className="empty pt0">One stock for everything you own. Each place has its own price.</div>
-          {data.products.map((p) => (
+          {Object.keys(byType).map((type) => {
+            const open = adminOpen.includes(type);
+            return (
+          <div key={type}>
+          <button className="group-head" data-on={open ? "1" : "0"} onClick={() => setAdminOpen((o) => (open ? o.filter((t) => t !== type) : [...o, type]))}>
+            <span>{type}</span>
+            <span className="cap">
+              {byType[type].length} · {byType[type].reduce((t, p) => t + Math.max(0, stockOf(p.id)), 0)} in stock
+            </span>
+            <span className="chev">{open ? "▾" : "▸"}</span>
+          </button>
+          {open && byType[type].map((p) => (
             <div key={p.id} className="prod">
               <div className="prod-head">
                 <EditableField
@@ -3440,6 +3453,7 @@ function App() {
                 <select
                   value={p.type}
                   onChange={(e) =>
+                    openAdminType(e.target.value) ||
                     save({ products: data.products.map((x) => (x.id === p.id ? { ...x, type: e.target.value } : x)) }, [
                       { table: "products", type: "update", id: p.id, row: { type: e.target.value } },
                     ])
@@ -3548,6 +3562,9 @@ function App() {
               )}
             </div>
           ))}
+          </div>
+            );
+          })}
           {designsReady === false && (
             <div className="empty">
               Photos for products (e.g. candle designs) aren't set up on the server yet. Run the designs part of supabase/schema.sql in Supabase, then reopen the app.
@@ -3558,6 +3575,7 @@ function App() {
             onClick={() => {
               const row = { id: uid(), name: "New product", type: "Honey", price: Object.fromEntries(data.locations.map((l) => [l.id, 0])) };
               save({ products: [...data.products, row] }, [{ table: "products", type: "insert", id: row.id, row }]);
+              openAdminType(row.type);
             }}
           >
             Add product
