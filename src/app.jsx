@@ -1286,7 +1286,7 @@ function App() {
     setTab("done");
     setTimeout(() => {
       setTab((cur) => (cur === "done" ? homeTab : cur));
-      setToast({ msg: `CHF ${money(total)} → ${account.name}`, undo: ticket });
+      setToast({ msg: `CHF ${money(total)} → ${account.name}` });
     }, 1600);
   };
 
@@ -1456,7 +1456,7 @@ function App() {
     };
     save({ sales: [row, ...data.sales] }, [{ table: "sales", type: "insert", id: row.id, row }]);
     setTipping(null);
-    setToast({ msg: `Tip CHF ${money(amount)} → ${account.name}`, undo: row.ticket });
+    setToast({ msg: `Tip CHF ${money(amount)} → ${account.name}` });
   };
 
   // Sales lists (newest first) keep only the latest few sales open so the
@@ -1647,11 +1647,11 @@ function App() {
     window.__beeBusy = cart.length > 0 || !!pickedProduct || !!cashAccount || tab === "pay";
   }, [cart.length, pickedProduct, cashAccount, tab]);
 
-  // Toasts get out of the way by themselves; ones with Undo stay a bit
-  // longer so there's time to tap it.
+  // Toasts are a passing note only: no buttons, taps go straight through,
+  // gone by themselves. A wrong sale is deleted from the Report tab.
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), toast.undo ? 5000 : 2500);
+    const t = setTimeout(() => setToast(null), 2200);
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -4136,13 +4136,8 @@ function App() {
       )}
 
       {toast && (
-        <div className="toast">
-          <span>{toast.msg}</span>
-          {toast.undo ? (
-            <button onClick={() => deleteTicket(toast.undo)}>Undo</button>
-          ) : (
-            <button onClick={() => setToast(null)}>OK</button>
-          )}
+        <div className="toast" role="status">
+          {toast.msg}
         </div>
       )}
     </div>
