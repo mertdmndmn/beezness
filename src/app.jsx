@@ -233,7 +233,14 @@ function saveMyName(name) {
 function saveCache(data) {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(data));
-  } catch {}
+  } catch {
+    // Over the browser's ~5 MB: design photos are the bulky part, so keep
+    // everything else offline and let the photos come back from the server.
+    try {
+      const designs = (data.designs || []).map((d) => ({ ...d, photo: "" }));
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ ...data, designs }));
+    } catch {}
+  }
 }
 function loadOutbox() {
   try {
@@ -1861,7 +1868,7 @@ function App() {
           {designsOf(product.id).map((d) => (
             <button key={d.id} className="design" disabled={available <= 0} onClick={() => pick(d)}>
               {inBag(d.id) > 0 && <span className="inbag">{inBag(d.id)}</span>}
-              <img src={d.photo} alt="" />
+              {d.photo ? <img src={d.photo} alt="" /> : <div className="nophoto">…</div>}
               <b>{d.name}</b>
             </button>
           ))}
@@ -3504,7 +3511,7 @@ function App() {
                       >
                         ×
                       </button>
-                      <img src={d.photo} alt="" />
+                      {d.photo ? <img src={d.photo} alt="" /> : <div className="nophoto">…</div>}
                       <EditableField
                         value={d.name}
                         cls="name"
