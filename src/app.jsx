@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
-import ExcelJS from "exceljs";
 
 // ---- Supabase config -------------------------------------------------
 // Fill these in with your project's URL and anon (public) key — see
@@ -92,6 +91,26 @@ const isoDate = (d) => {
 };
 
 // ---- Z report styling (ExcelJS) -----------------------------------------
+// Loaded on first download only (see build.js), so the app starts without
+// carrying a megabyte of spreadsheet code over market mobile data.
+let excelPromise = null;
+function loadExcel() {
+  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  if (!excelPromise) {
+    excelPromise = new Promise((resolve, reject) => {
+      const el = document.createElement("script");
+      el.src = __EXCEL_URL__;
+      el.onload = () => (window.ExcelJS ? resolve(window.ExcelJS) : reject(new Error("Excel didn't load")));
+      el.onerror = () => {
+        excelPromise = null; // let the next tap try again
+        el.remove();
+        reject(new Error("Excel didn't load"));
+      };
+      document.head.appendChild(el);
+    });
+  }
+  return excelPromise;
+}
 const XLSX_MONEY_FMT = "#,##0.00";
 const XLSX_INT_FMT = "0";
 const XLSX_HEADER_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFBEEDD" } };
@@ -1937,6 +1956,13 @@ function App() {
       : day.toLocaleDateString();
     const saleTime = (ts) => (multiDay ? `${shortDate(ts)} ${timeStr(ts)}` : timeStr(ts));
     const locs = data.locations;
+    let ExcelJS;
+    try {
+      ExcelJS = await loadExcel();
+    } catch {
+      setToast({ msg: "Couldn't load Excel (no signal?) — try again, or use Copy as CSV." });
+      return;
+    }
     const wb = new ExcelJS.Workbook();
     wb.creator = "BeeZness";
     wb.created = new Date();

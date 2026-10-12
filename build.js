@@ -18,6 +18,14 @@ function stamp() {
   fs.writeFileSync("sw.js", sw.replace(/const CACHE = "beezness-v\d+";/, `const CACHE = "beezness-v${version}";`));
 }
 
+// The Excel library (~1 MB) is only needed to download a Z report, so it
+// isn't bundled into app.js: its ready-made browser build is copied next to
+// it as excel.js and fetched on first use. The hash in its URL makes a new
+// library version a new file for every cache on the way.
+const excelSrc = fs.readFileSync("node_modules/exceljs/dist/exceljs.min.js");
+fs.writeFileSync("excel.js", excelSrc);
+const excelVersion = crypto.createHash("sha1").update(excelSrc).digest("hex").slice(0, 10);
+
 const watch = process.argv.includes("--watch");
 
 const options = {
@@ -28,6 +36,7 @@ const options = {
   outfile: "app.js",
   loader: { ".jsx": "jsx" },
   jsx: "automatic",
+  define: { __EXCEL_URL__: JSON.stringify(`excel.js?v=${excelVersion}`) },
   logLevel: "info",
   plugins: [{ name: "stamp", setup: (b) => b.onEnd((r) => r.errors.length || stamp()) }],
 };
