@@ -10,7 +10,7 @@ const crypto = require("crypto");
 function stamp() {
   const hash = crypto.createHash("sha1").update(fs.readFileSync("app.js")).digest("hex");
   const version = parseInt(hash.slice(0, 8), 16);
-  for (const file of ["index.html", "honey-till.html"]) {
+  for (const file of ["index.html"]) {
     const html = fs.readFileSync(file, "utf8");
     fs.writeFileSync(file, html.replace(/<script src="app\.js(\?v=\w+)?"><\/script>/, `<script src="app.js?v=${hash.slice(0, 10)}"></script>`));
   }

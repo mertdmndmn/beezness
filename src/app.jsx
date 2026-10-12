@@ -363,6 +363,16 @@ async function fetchAll() {
     }
     out[t] = r.data || [];
   });
+  // Newer columns that unlock photos shared by a whole product type and
+  // stock counted per design. A select of a missing column errors, so
+  // probe them rather than guess from (possibly empty) rows.
+  if (!out.missing.includes("designs")) {
+    const [a, b] = await Promise.all([
+      supabase.from("designs").select("type").limit(1),
+      supabase.from("batches").select("designId").limit(1),
+    ]);
+    if (a.error || b.error) out.missing.push("designs+");
+  }
   return out;
 }
 
@@ -521,6 +531,18 @@ function App() {
   const historyReady = missingTables && !missingTables.includes("sale_changes");
   const expensesReady = missingTables && !missingTables.includes("expenses");
   const designsReady = missingTables && !missingTables.includes("designs");
+  const designsPlus = designsReady && !missingTables.includes("designs+");
+  const [armed, setArmed] = useState(null); // id whose × was tapped once; a second tap deletes
+  const arm = (id, doIt) => {
+    if (armed === id) {
+      setArmed(null);
+      doIt();
+      return;
+    }
+    setArmed(id);
+    setTimeout(() => setArmed((a) => (a === id ? null : a)), 3000);
+  };
+  const [search, setSearch] = useState("");
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
   const [showAllSales, setShowAllSales] = useState(false);
@@ -765,6 +787,35 @@ function App() {
     return m;
   }, [data.products, data.batches, data.sales]);
   const stockOf = (pid) => round2(stockByPid[pid] || 0);
+  // Stock per design is opt-in: a design is counted once it has a batch of
+  // its own. Untracked designs (and "Other") sell from the rest, so photos
+  // work without ever entering design counts.
+  const designStock = useMemo(() => {
+    const m = {};
+    data.batches.forEach((b) => {
+      if (b.designId) m[`${b.pid}|${b.designId}`] = (m[`${b.pid}|${b.designId}`] || 0) + Number(b.qty || 0);
+    });
+    data.sales.forEach((s) => {
+      const k = `${s.pid}|${s.designId}`;
+      if (s.designId && k in m) m[k] -= Number(s.qty || 0);
+    });
+    return m;
+  }, [data.batches, data.sales]);
+  const designStockOf = (pid, designId) => {
+    const v = designStock[`${pid}|${designId}`];
+    return v === undefined ? null : round2(v);
+  };
+  const otherStockOf = (pid) =>
+    round2(stockOf(pid) - Object.entries(designStock).reduce((t, [k, v]) => (k.startsWith(`${pid}|`) ? t + v : t), 0));
+  // What's left to add of one design (or "Other" for null/untracked).
+  const designLeft = (pid, designId) => {
+    const own = designId ? designStockOf(pid, designId) : null;
+    if (own !== null) return own - inCartDesign(pid, designId);
+    const untrackedInCart = cart
+      .filter((l) => l.pid === pid && (!l.designId || designStockOf(pid, l.designId) === null))
+      .reduce((t, l) => t + l.qty, 0);
+    return Math.min(otherStockOf(pid) - untrackedInCart, stockOf(pid) - inCartQty(pid));
+  };
 
   const locationName = (id) => (data.locations.find((l) => l.id === id) || {}).name || "—";
   const priceOf = (product, locId = activeLoc) => Number((product.price || {})[locId] || 0);
@@ -772,7 +823,16 @@ function App() {
   // price for a market: the first place that does price it.
   const anyPriceOf = (product) => Number(Object.values(product.price || {}).find((v) => Number(v) > 0) || 0);
   const inCartQty = (pid) => cart.filter((l) => l.pid === pid).reduce((s, l) => s + l.qty, 0);
-  const designsOf = (pid) => data.designs.filter((d) => d.pid === pid).sort((a, b) => a.ts - b.ts);
+  // A product's designs: its own, plus any shared by every product of its
+  // type (pid empty, type set), e.g. one set of candle photos for all sizes.
+  const designsOf = (pid) => {
+    const product = data.products.find((p) => p.id === pid);
+    return data.designs
+      .filter((d) => d.pid === pid || (!d.pid && product && d.type === product.type))
+      .sort((a, b) => a.ts - b.ts);
+  };
+  const inCartDesign = (pid, designId) =>
+    cart.filter((l) => l.pid === pid && (l.designId || null) === designId).reduce((t, l) => t + l.qty, 0);
   const cartTotal = cart.reduce((s, l) => s + l.qty * l.price, 0);
 
   const openMarket = data.markets.find((m) => !m.endedAt) || null;
@@ -933,8 +993,26 @@ function App() {
     const dayOf = (s) => (every ? dayKey(s.ts) : `${s.marketId}|${dayKey(s.ts)}`);
     const days = new Set(rows.map(dayOf));
     const byItem = {};
+    const byProduct = {};
+    const byDesign = {};
+    const byDay = {};
+    const tally = (map, key, init, s) => {
+      const it = (map[key] = map[key] || { key, qty: 0, sum: 0, perDay: {}, ...init });
+      it.qty += s.qty;
+      it.sum += s.qty * s.price;
+      it.perDay[dayOf(s)] = (it.perDay[dayOf(s)] || 0) + s.qty;
+    };
     rows.forEach((s) => {
+      const day = (byDay[dayOf(s)] = byDay[dayOf(s)] || { key: dayOf(s), ts: s.ts, sum: 0, units: 0 });
+      day.ts = Math.min(day.ts, s.ts);
+      day.sum += s.qty * s.price;
       if (s.pid === TIP_PID) return;
+      day.units += s.qty;
+      tally(byProduct, s.pid, { pid: s.pid, name: (data.products.find((p) => p.id === s.pid) || s).name }, s);
+      if (s.designId) {
+        const d = data.designs.find((x) => x.id === s.designId);
+        tally(byDesign, s.designId, { name: d ? d.name : s.design || "Design", photo: d ? d.photo : null }, s);
+      }
       // Each design counts on its own, so the best-selling candle shows up.
       const key = `${s.pid}|${s.designId || ""}`;
       const design = s.designId && data.designs.find((x) => x.id === s.designId);
@@ -945,16 +1023,48 @@ function App() {
       it.perDay[d] = (it.perDay[d] || 0) + s.qty;
     });
     const n = days.size || 1;
-    const items = Object.values(byItem)
-      .map((it) => ({ ...it, avg: it.qty / n, best: Math.max(...Object.values(it.perDay)) }))
-      .sort((a, b) => b.avg - a.avg || byName(a, b));
+    const ranked = (map) =>
+      Object.values(map)
+        .map((it) => ({ ...it, avg: it.qty / n, best: Math.max(...Object.values(it.perDay)) }))
+        .sort((a, b) => b.avg - a.avg || byName(a, b));
+    const items = ranked(byItem);
     return {
       days: days.size,
       items,
+      products: ranked(byProduct),
+      designs: ranked(byDesign),
+      trend: Object.values(byDay).sort((a, b) => a.ts - b.ts),
       avgTakings: rows.reduce((t, s) => t + s.qty * s.price, 0) / n,
       avgUnits: unitsOf(rows) / n,
     };
-  }, [data.sales, data.designs, statsMarket]);
+  }, [data.sales, data.designs, data.products, statsMarket]);
+  const [trendOpen, setTrendOpen] = useState(null);
+  // Ranked horizontal bars: average sold per day, tap a bar for details.
+  const statBars = (list) => (
+    <div className="bars">
+      {list.map((it) => {
+        const max = list[0].avg || 1;
+        const open = statsOpen === it.key;
+        return (
+          <button key={it.key} className="bar" onClick={() => setStatsOpen(open ? null : it.key)}>
+            <span className="bar-label">
+              {it.photo && <img className="thumb" src={it.photo} alt="" />}
+              <span className="grow">{it.name}</span>
+              <span className="num">{avgStr(it.avg)}</span>
+            </span>
+            <span className="bar-track">
+              <span className="bar-fill" style={{ width: `${Math.max(1.5, (it.avg / max) * 100)}%` }} />
+            </span>
+            {open && (
+              <span className="bar-more">
+                {it.qty} sold in {stats.days} {stats.days === 1 ? "day" : "days"} · best day {it.best} · CHF {money(it.sum)}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
   const avgStr = (n) => (Math.round(n * 10) / 10).toString();
 
   // Every sale lands in exactly one bucket — a person, the common account,
@@ -1014,6 +1124,7 @@ function App() {
       setDesignPick(product);
       return;
     }
+    if (design !== undefined && designLeft(product.id, design ? design.id : null) <= 0) return;
     const list = effectivePrice(product);
     const mode = giftMode ? "gift" : "full";
     const price = giftMode ? 0 : list;
@@ -1043,7 +1154,8 @@ function App() {
       setCart(cart.filter((_, j) => j !== i));
       return;
     }
-    const max = stockOf(line.pid) - (inCartQty(line.pid) - line.qty);
+    const productMax = stockOf(line.pid) - (inCartQty(line.pid) - line.qty);
+    const max = line.designId ? Math.min(productMax, designLeft(line.pid, line.designId) + line.qty) : productMax;
     const capped = Math.min(q, Math.max(0, max));
     if (capped < q) setToast({ msg: `Only ${capped} ${line.name} in stock — add stock in Admin for more.` });
     setCart(capped <= 0 ? cart.filter((_, j) => j !== i) : cart.map((l, j) => (j === i ? { ...l, qty: capped } : l)));
@@ -1052,7 +1164,7 @@ function App() {
   const changeLineQty = (i, delta) => {
     const line = cart[i];
     if (!line) return;
-    if (delta > 0 && stockOf(line.pid) - inCartQty(line.pid) <= 0) return;
+    if (delta > 0 && (stockOf(line.pid) - inCartQty(line.pid) <= 0 || (line.designId && designLeft(line.pid, line.designId) <= 0))) return;
     const q = line.qty + delta;
     setCart(q <= 0 ? cart.filter((_, j) => j !== i) : cart.map((l, j) => (j === i ? { ...l, qty: q } : l)));
   };
@@ -1357,6 +1469,77 @@ function App() {
       <button className="ghost solid wide mt8" style={{ padding: 18, fontSize: 17 }} onClick={() => setTab("pay")}>
         Next · CHF {money(cartTotal)} →
       </button>
+    </div>
+  );
+
+  // Photo squares with rename, two-tap delete and an Add photo square.
+  // owner is { pid } for one product or { type } for every product of a type.
+  const designGrid = (designs, owner) => (
+    <div className="designs small">
+      {designs.map((d) => (
+        <div key={d.id} className="design">
+          <button
+            className={armed === d.id ? "armed del" : "x del"}
+            onClick={() => arm(d.id, () => save({ designs: data.designs.filter((x) => x.id !== d.id) }, [{ table: "designs", type: "delete", id: d.id }]))}
+            aria-label="Remove design"
+          >
+            {armed === d.id ? "Delete?" : "×"}
+          </button>
+          {d.photo ? <img src={d.photo} alt="" /> : <div className="nophoto">…</div>}
+          <EditableField
+            value={d.name}
+            cls="name"
+            onCommit={(v) =>
+              save({ designs: data.designs.map((x) => (x.id === d.id ? { ...x, name: v } : x)) }, [
+                { table: "designs", type: "update", id: d.id, row: { name: v } },
+              ])
+            }
+          />
+        </div>
+      ))}
+      <label className="design add">
+        <input
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={async (e) => {
+            const file = e.target.files && e.target.files[0];
+            e.target.value = "";
+            if (!file) return;
+            try {
+              const photo = await shrinkPhoto(file);
+              const row = { id: uid(), pid: owner.pid || null, ...(owner.type && { type: owner.type }), name: `Design ${designs.length + 1}`, photo, ts: Date.now() };
+              save({ designs: [...data.designs, row] }, [{ table: "designs", type: "insert", id: row.id, row }]);
+            } catch (err) {
+              setToast({ msg: err.message });
+            }
+          }}
+        />
+        <div className="nophoto">+</div>
+        <b>Add photo</b>
+      </label>
+    </div>
+  );
+
+  // Gift mode stays on across taps, so it has to be impossible to miss.
+  const giftBanner = giftMode && (
+    <button className="giftbar" onClick={() => setGiftMode(false)}>
+      <span>🎁 Gift mode — everything you tap is free</span>
+      <b>Stop</b>
+    </button>
+  );
+  const matchesSearch = (p) => {
+    const q = search.trim().toLowerCase();
+    return !q || p.name.toLowerCase().includes(q) || p.type.toLowerCase().includes(q);
+  };
+  const searchBox = (
+    <div className="search">
+      <input placeholder="Search products…" value={search} onChange={(e) => setSearch(e.target.value)} />
+      {search && (
+        <button className="x" onClick={() => setSearch("")} aria-label="Clear search">
+          ×
+        </button>
+      )}
     </div>
   );
 
@@ -1846,40 +2029,51 @@ function App() {
   if (!ready) return <div className="hl"><div className="empty">Opening BeeZness…</div></div>;
 
   if (designPick) {
+    // Stays open so several candles in different designs go in one visit;
+    // each tap adds one, the badge counts them, Done goes back.
     const product = designPick;
     const available = stockOf(product.id) - inCartQty(product.id);
-    const pick = (design) => {
-      quickAdd(product, design);
-      setDesignPick(null);
+    const pick = (design) => quickAdd(product, design);
+    const inBag = (designId) => inCartDesign(product.id, designId);
+    const leftLabel = (designId) => {
+      const own = designId ? designStockOf(product.id, designId) : null;
+      if (own === null && designId) return null;
+      const n = Math.max(0, designLeft(product.id, designId));
+      return n > 0 ? `${n} left` : "sold out";
     };
-    const inBag = (designId) => cart.filter((l) => l.pid === product.id && (l.designId || null) === designId).reduce((t, l) => t + l.qty, 0);
     return (
       <div className="hl">
         <button className="ghost" onClick={() => setDesignPick(null)}>
           ← Back
         </button>
+        {giftBanner}
         <div style={{ margin: "18px 0 14px" }}>
           <div className="cap">
             {giftMode ? "Gift · " : ""}
             {available} in stock · CHF {money(effectivePrice(product))}
           </div>
           <h1 className="xl">{product.name}</h1>
-          <div className="sub">Which one?</div>
+          <div className="sub">Tap each one sold, then Done.</div>
         </div>
         <div className="designs">
           {designsOf(product.id).map((d) => (
-            <button key={d.id} className="design" disabled={available <= 0} onClick={() => pick(d)}>
+            <button key={d.id} className="design" disabled={available <= 0 || designLeft(product.id, d.id) <= 0} onClick={() => pick(d)}>
               {inBag(d.id) > 0 && <span className="inbag">{inBag(d.id)}</span>}
               {d.photo ? <img src={d.photo} alt="" /> : <div className="nophoto">…</div>}
               <b>{d.name}</b>
+              {leftLabel(d.id) && <span className="left">{leftLabel(d.id)}</span>}
             </button>
           ))}
-          <button className="design" disabled={available <= 0} onClick={() => pick(null)}>
+          <button className="design" disabled={available <= 0 || designLeft(product.id, null) <= 0} onClick={() => pick(null)}>
             {inBag(null) > 0 && <span className="inbag">{inBag(null)}</span>}
             <div className="nophoto">?</div>
             <b>Other</b>
+            <span className="left">{leftLabel(null)}</span>
           </button>
         </div>
+        <button className="ghost solid wide mt16" style={{ padding: 18, fontSize: 17 }} onClick={() => setDesignPick(null)}>
+          Done{cart.length ? ` · CHF ${money(cartTotal)}` : ""}
+        </button>
       </div>
     );
   }
@@ -2013,6 +2207,11 @@ function App() {
             <div className="v">{money(l.qty * l.price)}</div>
           </div>
         ))}
+        {cart.some((l) => l.mode === "gift") && (
+          <div className="giftwarn">
+            🎁 {cart.filter((l) => l.mode === "gift").reduce((t, l) => t + l.qty, 0)} item(s) in this sale are gifts (CHF 0). Tap ← Back to change.
+          </div>
+        )}
         <div className="cap mt16 mb6">Note — who it went to, optional</div>
         <input
           list="notelist"
@@ -2541,10 +2740,13 @@ function App() {
 
         {syncFailurePanel}
 
+        {giftBanner}
+        {marketProducts.length > 6 && searchBox}
+
         {marketProducts.length === 0 && (
           <div className="empty">No products picked for today — use "Edit name or today's table" below.</div>
         )}
-        {tileRows(marketProducts).map((row) => (
+        {tileRows(marketProducts.filter(matchesSearch)).map((row) => (
           <div className="tiles mb10" key={row[0].id}>
             {row.map((p) => {
               const available = stockOf(p.id) - inCartQty(p.id);
@@ -2757,10 +2959,10 @@ function App() {
       <div className="tabs">
         {[
           ["sell", "Sell"],
-          ["report", "Z report"],
+          ["report", "Report"],
           ["stats", "Stats"],
-          ["settle", "Who owes"],
-          ["expenses", "Expenses"],
+          ["settle", "Owes"],
+          ["expenses", "Costs"],
           ["admin", "Admin"],
         ].map(([id, label]) => (
           <button key={id} data-on={tab === id ? "1" : "0"} onClick={() => setTab(id)}>
@@ -2782,15 +2984,18 @@ function App() {
             Start market day
           </button>
 
+          {giftBanner}
+          {data.products.length > 6 && searchBox}
           {data.products.length === 0 && (
             <div className="empty">Nothing to sell yet. Open Admin and add your honey, candles and balms.</div>
           )}
-          {Object.keys(byType).map((type) => (
+          {search.trim() && !data.products.some(matchesSearch) && <div className="empty">No product matches "{search.trim()}".</div>}
+          {Object.keys(byType).filter((type) => byType[type].some(matchesSearch)).map((type) => (
             <div key={type} style={{ marginBottom: 18 }}>
               <div className="cap" style={{ marginBottom: 9 }}>
                 {type}
               </div>
-              {tileRows(byType[type]).map((row) => (
+              {tileRows(byType[type].filter(matchesSearch)).map((row) => (
                 <div className="tiles mb10" key={row[0].id}>
                   {row.map((p) => {
                     const available = stockOf(p.id) - inCartQty(p.id);
@@ -3017,6 +3222,38 @@ function App() {
                 </div>
               </div>
 
+              {stats.trend.length > 1 && (
+                <>
+                  <hr className="rule" />
+                  <div className="cap">Takings per {statsMarket === "everywhere" ? "day" : "market day"}</div>
+                  <div className="trend">
+                    {stats.trend.map((d) => {
+                      const max = Math.max(...stats.trend.map((x) => x.sum)) || 1;
+                      return (
+                        <button key={d.key} className="col" data-on={trendOpen === d.key ? "1" : "0"} onClick={() => setTrendOpen(trendOpen === d.key ? null : d.key)}>
+                          <span className="col-track">
+                            <span className="col-fill" style={{ height: `${Math.max(2, (d.sum / max) * 100)}%` }} />
+                          </span>
+                          <span className="col-label">{shortDate(d.ts)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const d = stats.trend.find((x) => x.key === trendOpen);
+                    return (
+                      <div className="empty pt0">
+                        {d
+                          ? `${new Date(d.ts).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", year: "numeric" })}${
+                              d.key.includes("|") ? ` · ${(data.markets.find((m) => m.id === d.key.split("|")[0]) || {}).name || "Market"}` : ""
+                            } · CHF ${money(d.sum)} · ${d.units} items`
+                          : "Oldest on the left. Tap a bar for that day."}
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+
               <hr className="rule" />
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div className="cap">Average per day, by product</div>
@@ -3032,30 +3269,10 @@ function App() {
                 </div>
               </div>
               {statsView === "chart" && (
-                <div className="bars">
-                  {stats.items.map((it) => {
-                    const max = stats.items[0].avg || 1;
-                    const open = statsOpen === it.key;
-                    return (
-                      <button key={it.key} className="bar" onClick={() => setStatsOpen(open ? null : it.key)}>
-                        <span className="bar-label">
-                          {it.photo && <img className="thumb" src={it.photo} alt="" />}
-                          <span className="grow">{it.name}</span>
-                          <span className="num">{avgStr(it.avg)}</span>
-                        </span>
-                        <span className="bar-track">
-                          <span className="bar-fill" style={{ width: `${Math.max(1.5, (it.avg / max) * 100)}%` }} />
-                        </span>
-                        {open && (
-                          <span className="bar-more">
-                            {it.qty} sold in {stats.days} {stats.days === 1 ? "day" : "days"} · best day {it.best} · CHF {money(it.sum)}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
+                <>
+                  {statBars(stats.items)}
                   <div className="empty">Bars show the average sold per day. Tap one for details.</div>
-                </div>
+                </>
               )}
               {statsView === "list" && stats.items.map((it) => (
                 <div className="row" key={it.key}>
@@ -3069,6 +3286,40 @@ function App() {
                   <div className="v">{avgStr(it.avg)} / day</div>
                 </div>
               ))}
+              {stats.designs.length > 0 && (
+                <>
+                  <hr className="rule" />
+                  <div className="cap">Designs, all sizes together</div>
+                  {statBars(stats.designs)}
+                </>
+              )}
+
+              {statsMarket !== "everywhere" && (
+                <>
+                  <hr className="rule" />
+                  <div className="cap">Packing list for next time</div>
+                  <div className="empty pt0" style={{ margin: "2px 0 4px" }}>
+                    Bring what sold on the best day{statsMarket === "all" ? " at any market" : ` at ${statsMarket}`}, so you shouldn't run out.
+                  </div>
+                  {stats.products.map((it) => {
+                    const have = Math.max(0, stockOf(it.pid));
+                    const short = it.best - have;
+                    return (
+                      <div className="row" key={it.key}>
+                        <div className="grow">
+                          <div className="t">{it.name}</div>
+                          <div className="s">
+                            {have} in stock
+                            {short > 0 && <span className="lowtag"> · {short} short</span>}
+                          </div>
+                        </div>
+                        <div className="v">bring {it.best}</div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+
               <div className="empty">Counts every item that left the stall, gifts included. Tips are left out.</div>
             </>
           )}
@@ -3419,17 +3670,29 @@ function App() {
           <div className="empty pt0">One stock for everything you own. Each place has its own price.</div>
           {Object.keys(byType).map((type) => {
             const open = adminOpen.includes(type);
+            const low = byType[type].filter((p) => stockOf(p.id) <= 3).length;
+            const shared = data.designs.filter((d) => !d.pid && d.type === type).sort((a, b) => a.ts - b.ts);
             return (
           <div key={type}>
           <button className="group-head" data-on={open ? "1" : "0"} onClick={() => setAdminOpen((o) => (open ? o.filter((t) => t !== type) : [...o, type]))}>
             <span>{type}</span>
             <span className="cap">
               {byType[type].length} · {byType[type].reduce((t, p) => t + Math.max(0, stockOf(p.id)), 0)} in stock
+              {low > 0 && <span className="lowtag"> · {low} low</span>}
             </span>
             <span className="chev">{open ? "▾" : "▸"}</span>
           </button>
+          {open && designsPlus && (
+            <div className="prod">
+              <div className="lbl">Photos for every {type.toLowerCase()}</div>
+              <div className="empty pt0" style={{ margin: "4px 0 0" }}>
+                Shown when selling any {type.toLowerCase()} here. Add a photo to a single product below if only that one has it.
+              </div>
+              {designGrid(shared, { type })}
+            </div>
+          )}
           {open && byType[type].map((p) => (
-            <div key={p.id} className="prod">
+            <div key={p.id} className="prod" data-low={stockOf(p.id) <= 3 ? "1" : "0"}>
               <div className="prod-head">
                 <EditableField
                   value={p.name}
@@ -3437,16 +3700,18 @@ function App() {
                   onCommit={(v) => save({ products: data.products.map((x) => (x.id === p.id ? { ...x, name: v } : x)) }, [{ table: "products", type: "update", id: p.id, row: { name: v } }])}
                 />
                 <button
-                  className="x"
+                  className={armed === p.id ? "armed" : "x"}
                   onClick={() =>
-                    save(
-                      { products: data.products.filter((x) => x.id !== p.id), batches: data.batches.filter((b) => b.pid !== p.id) },
-                      [{ table: "products", type: "delete", id: p.id }]
+                    arm(p.id, () =>
+                      save(
+                        { products: data.products.filter((x) => x.id !== p.id), batches: data.batches.filter((b) => b.pid !== p.id) },
+                        [{ table: "products", type: "delete", id: p.id }]
+                      )
                     )
                   }
                   aria-label="Remove product"
                 >
-                  ×
+                  {armed === p.id ? "Delete?" : "×"}
                 </button>
               </div>
               <div className="prod-line">
@@ -3463,7 +3728,7 @@ function App() {
                     <option key={t}>{t}</option>
                   ))}
                 </select>
-                <span className="lbl">Jars</span>
+                <span className="lbl">{stockOf(p.id) <= 3 ? <span className="lowtag">Low</span> : "Jars"}</span>
                 <EditableField
                   mono
                   cls="mini"
@@ -3514,50 +3779,49 @@ function App() {
                   </div>
                 ))}
               </div>
-              {designsReady && (
-                <div className="designs small">
-                  {designsOf(p.id).map((d) => (
-                    <div key={d.id} className="design">
-                      <button
-                        className="x del"
-                        onClick={() => save({ designs: data.designs.filter((x) => x.id !== d.id) }, [{ table: "designs", type: "delete", id: d.id }])}
-                        aria-label="Remove design"
-                      >
-                        ×
-                      </button>
-                      {d.photo ? <img src={d.photo} alt="" /> : <div className="nophoto">…</div>}
-                      <EditableField
-                        value={d.name}
-                        cls="name"
-                        onCommit={(v) =>
-                          save({ designs: data.designs.map((x) => (x.id === d.id ? { ...x, name: v } : x)) }, [
-                            { table: "designs", type: "update", id: d.id, row: { name: v } },
-                          ])
-                        }
-                      />
-                    </div>
-                  ))}
-                  <label className="design add">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      hidden
-                      onChange={async (e) => {
-                        const file = e.target.files && e.target.files[0];
-                        e.target.value = "";
-                        if (!file) return;
-                        try {
-                          const photo = await shrinkPhoto(file);
-                          const row = { id: uid(), pid: p.id, name: `Design ${designsOf(p.id).length + 1}`, photo, ts: Date.now() };
-                          save({ designs: [...data.designs, row] }, [{ table: "designs", type: "insert", id: row.id, row }]);
-                        } catch (err) {
-                          setToast({ msg: err.message });
-                        }
-                      }}
-                    />
-                    <div className="nophoto">+</div>
-                    <b>Add photo</b>
-                  </label>
+              {designsReady && designGrid(data.designs.filter((d) => d.pid === p.id).sort((a, b) => a.ts - b.ts), { pid: p.id })}
+              {designsPlus && designsOf(p.id).length > 0 && (
+                <div className="dstock">
+                  <div className="lbl mt12">How many of each design</div>
+                  <div className="empty pt0" style={{ margin: "2px 0 6px" }}>
+                    Optional. Counting a design moves it out of "Other", so the total stays {stockOf(p.id)}. Leave blank to not count it.
+                  </div>
+                  {designsOf(p.id).map((d) => {
+                    const n = designStockOf(p.id, d.id);
+                    return (
+                      <div className="dstock-row" key={d.id}>
+                        {d.photo ? <img className="thumb" src={d.photo} alt="" /> : <span className="thumb" />}
+                        <span className="grow">{d.name}</span>
+                        <EditableField
+                          mono
+                          cls="mini"
+                          placeholder="–"
+                          value={n === null ? "" : n}
+                          onCommit={(v) => {
+                            const delta = round2(Number(v) - (n || 0));
+                            if (n === null && !v) return;
+                            if (!delta && n !== null) return;
+                            // Counting a design moves stock out of "Other"
+                            // (as far as Other has it); anything beyond that
+                            // is new stock, so the total only grows by that.
+                            const fromOther = Math.max(0, Math.min(delta, otherStockOf(p.id)));
+                            const rows = [{ id: uid(), pid: p.id, designId: d.id, qty: delta, ts: Date.now(), note: `design count: ${d.name}` }];
+                            if (fromOther) rows.push({ id: uid(), pid: p.id, qty: -fromOther, ts: Date.now(), note: `moved to ${d.name}` });
+                            if (delta < 0) rows.push({ id: uid(), pid: p.id, qty: -delta, ts: Date.now(), note: `moved from ${d.name}` });
+                            save(
+                              { batches: [...rows, ...data.batches] },
+                              rows.map((row) => ({ table: "batches", type: "insert", id: row.id, row }))
+                            );
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                  <div className="dstock-row">
+                    <span className="thumb nophoto">?</span>
+                    <span className="grow">Other</span>
+                    <span className="num" style={{ paddingRight: 10 }}>{otherStockOf(p.id)}</span>
+                  </div>
                 </div>
               )}
             </div>

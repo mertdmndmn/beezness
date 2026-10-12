@@ -1,4 +1,4 @@
-const CACHE = "beezness-v3619540085";
+const CACHE = "beezness-v3378940084";
 const FILES = ["./", "./index.html", "./app.js", "./icon.png", "./manifest.json"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
@@ -9,7 +9,7 @@ self.addEventListener("activate", (e) => {
 // index.html/app.js change on every deploy, so they go network-first (falling
 // back to cache only when offline) — otherwise a stale cached copy would
 // keep serving indefinitely even after a fresh version is pushed.
-const NETWORK_FIRST_SUFFIXES = ["/", "/index.html", "/honey-till.html", "/app.js"];
+const NETWORK_FIRST_SUFFIXES = ["/", "/index.html", "/app.js"];
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
   const url = new URL(e.request.url);

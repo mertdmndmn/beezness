@@ -190,3 +190,11 @@ alter table designs enable row level security;
 drop policy if exists "authenticated full access" on designs;
 create policy "authenticated full access" on designs for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- Designs shared by every product of a type (pid empty, type set), e.g.
+-- one set of candle photos for all sizes. And optional stock per design:
+-- a batch with a designId counts towards that design (still part of the
+-- product's total). Additive; safe to run on its own.
+alter table designs alter column pid drop not null;
+alter table designs add column if not exists type text;
+alter table batches add column if not exists "designId" text;
