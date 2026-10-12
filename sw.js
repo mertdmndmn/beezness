@@ -1,4 +1,4 @@
-const CACHE = "beezness-v29";
+const CACHE = "beezness-v3619540085";
 const FILES = ["./", "./index.html", "./app.js", "./icon.png", "./manifest.json"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
@@ -31,7 +31,7 @@ self.addEventListener("fetch", (e) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
         return res;
-      }).catch(() => caches.match(e.request).then((hit) => hit || caches.match("./index.html")))
+      }).catch(() => caches.match(e.request, { ignoreSearch: true }).then((hit) => hit || caches.match("./index.html")))
     );
     return;
   }
