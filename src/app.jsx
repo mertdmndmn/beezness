@@ -3635,11 +3635,11 @@ function App() {
                     <>
                       <hr className="rule" />
                       <div className="stats-head">
-                        <div className="cap">Packing list</div>
+                        <div className="cap">Packing list · days</div>
                         <div className="seg mini">
-                          {[1, 2, 3].map((d) => (
-                            <button key={d} data-on={packDays === d ? "1" : "0"} onClick={() => setPackDays(d)}>
-                              {d} {d === 1 ? "day" : "days"}
+                          {[1, 2, 3, 4, 5].map((d) => (
+                            <button key={d} data-on={packDays === d ? "1" : "0"} onClick={() => setPackDays(d)} aria-label={`${d} ${d === 1 ? "day" : "days"}`}>
+                              {d}
                             </button>
                           ))}
                         </div>
