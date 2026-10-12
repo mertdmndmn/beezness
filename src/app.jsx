@@ -14,13 +14,15 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes", "expenses"];
-const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [], expenses: [] };
+const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes", "expenses", "designs"];
+const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [], expenses: [], designs: [] };
 // Newer than the rest of the schema: a project that hasn't run that part of
 // schema.sql yet must still load, just without sale history (and without
 // the ability to move sales, since that would be a change with no record).
 // Same for expenses: no table, no Expenses tab.
-const OPTIONAL_TABLES = new Set(["sale_changes", "expenses"]);
+// Same for designs (product photos to pick from, e.g. candle colours): no
+// table, no Designs section and no picker.
+const OPTIONAL_TABLES = new Set(["sale_changes", "expenses", "designs"]);
 
 const CACHE_KEY = "honey-till-cache-v1";
 const OUTBOX_KEY = "honey-till-outbox-v1";
@@ -423,6 +425,30 @@ async function migrateLegacy(raw) {
   await Promise.all(inserts);
 }
 
+// Phone photos are several MB; a design only needs a small square-ish
+// thumbnail. Shrunk to a JPEG data URL and stored in the designs row itself,
+// so it syncs and caches offline like any other data.
+function shrinkPhoto(file, max = 360) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k);
+      c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL("image/jpeg", 0.72));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Couldn't read that photo"));
+    };
+    img.src = url;
+  });
+}
+
 function EditableField({ value, onCommit, mono, cls, style, placeholder, list }) {
   const [text, setText] = useState(String(value));
   useEffect(() => setText(String(value)), [value]);
@@ -483,10 +509,12 @@ function App() {
   const [missingTables, setMissingTables] = useState(null);
   const historyReady = missingTables && !missingTables.includes("sale_changes");
   const expensesReady = missingTables && !missingTables.includes("expenses");
+  const designsReady = missingTables && !missingTables.includes("designs");
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
   const [showAllSales, setShowAllSales] = useState(false);
-  const [giftMode, setGiftMode] = useState(false); // next product tile tapped goes in as a gift
+  const [giftMode, setGiftMode] = useState(false); // product tiles tapped go in as gifts until switched off
+  const [designPick, setDesignPick] = useState(null); // product whose design grid is open
   const [invoiceAsk, setInvoiceAsk] = useState(false); // invoice tapped without a customer name yet
   const [tipping, setTipping] = useState(null); // { amount } while the market tip form is open
   const [repaying, setRepaying] = useState(null); // { ticket, by } while a market sale's payment is being corrected
@@ -733,6 +761,7 @@ function App() {
   // price for a market: the first place that does price it.
   const anyPriceOf = (product) => Number(Object.values(product.price || {}).find((v) => Number(v) > 0) || 0);
   const inCartQty = (pid) => cart.filter((l) => l.pid === pid).reduce((s, l) => s + l.qty, 0);
+  const designsOf = (pid) => data.designs.filter((d) => d.pid === pid).sort((a, b) => a.ts - b.ts);
   const cartTotal = cart.reduce((s, l) => s + l.qty * l.price, 0);
 
   const openMarket = data.markets.find((m) => !m.endedAt) || null;
@@ -886,13 +915,20 @@ function App() {
     [reportMarkets, data.sales]
   );
   const stats = useMemo(() => {
-    const rows = data.sales.filter((s) => s.marketId && (statsMarket === "all" || s.market === statsMarket));
-    const days = new Set(rows.map((s) => `${s.marketId}|${dayKey(s.ts)}`));
+    // "everywhere" takes every sale, at markets or not; a day is then any
+    // calendar day with a sale.
+    const every = statsMarket === "everywhere";
+    const rows = data.sales.filter((s) => (every ? true : s.marketId && (statsMarket === "all" || s.market === statsMarket)));
+    const dayOf = (s) => (every ? dayKey(s.ts) : `${s.marketId}|${dayKey(s.ts)}`);
+    const days = new Set(rows.map(dayOf));
     const byItem = {};
     rows.forEach((s) => {
       if (s.pid === TIP_PID) return;
-      const it = (byItem[s.pid] = byItem[s.pid] || { pid: s.pid, name: s.name, qty: 0, sum: 0, perDay: {} });
-      const d = `${s.marketId}|${dayKey(s.ts)}`;
+      // Each design counts on its own, so the best-selling candle shows up.
+      const key = `${s.pid}|${s.designId || ""}`;
+      const design = s.designId && data.designs.find((x) => x.id === s.designId);
+      const it = (byItem[key] = byItem[key] || { key, name: s.name, photo: design ? design.photo : null, qty: 0, sum: 0, perDay: {} });
+      const d = dayOf(s);
       it.qty += s.qty;
       it.sum += s.qty * s.price;
       it.perDay[d] = (it.perDay[d] || 0) + s.qty;
@@ -907,7 +943,7 @@ function App() {
       avgTakings: rows.reduce((t, s) => t + s.qty * s.price, 0) / n,
       avgUnits: unitsOf(rows) / n,
     };
-  }, [data.sales, statsMarket]);
+  }, [data.sales, data.designs, statsMarket]);
   const avgStr = (n) => (Math.round(n * 10) / 10).toString();
 
   // Every sale lands in exactly one bucket — a person, the common account,
@@ -958,17 +994,34 @@ function App() {
   // Tapping a tile drops one at full price straight into the basket; tapping
   // again adds another. Price changes (half, gift, custom) happen by tapping
   // the line in the basket, which opens the product screen for that line.
-  const quickAdd = (product) => {
+  // A product with designs opens its picture grid first; the chosen design
+  // rides along on the line (and its name in the line's name, so baskets,
+  // receipts and the Z report all show it without extra work).
+  const quickAdd = (product, design) => {
     if (stockOf(product.id) - inCartQty(product.id) <= 0) return;
+    if (design === undefined && designsReady && designsOf(product.id).length) {
+      setDesignPick(product);
+      return;
+    }
     const list = effectivePrice(product);
     const mode = giftMode ? "gift" : "full";
     const price = giftMode ? 0 : list;
+    const designId = design ? design.id : null;
     const next = [...cart];
-    const idx = next.findIndex((l) => l.pid === product.id && l.price === price && l.mode === mode);
+    const idx = next.findIndex((l) => l.pid === product.id && l.price === price && l.mode === mode && (l.designId || null) === designId);
     if (idx >= 0) next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
-    else next.push({ pid: product.id, name: product.name, type: product.type, price, list, mode, qty: 1 });
+    else
+      next.push({
+        pid: product.id,
+        name: design ? `${product.name} · ${design.name}` : product.name,
+        type: product.type,
+        price,
+        list,
+        mode,
+        qty: 1,
+        ...(design && { designId, design: design.name }),
+      });
     setCart(next);
-    setGiftMode(false);
   };
 
   const setLineQty = (i, n) => {
@@ -1006,11 +1059,23 @@ function App() {
     const product = pickedProduct;
     const list = effectivePrice(product);
     const price = priceMode === "gift" ? 0 : Number(unitPrice) || 0;
+    const edited = editLine === null ? null : cart[editLine];
+    const designId = (edited && edited.designId) || null;
     const next = editLine === null ? [...cart] : cart.filter((_, j) => j !== editLine);
     setEditLine(null);
-    const idx = next.findIndex((l) => l.pid === product.id && l.price === price && l.mode === priceMode);
+    const idx = next.findIndex((l) => l.pid === product.id && l.price === price && l.mode === priceMode && (l.designId || null) === designId);
     if (idx >= 0) next[idx] = { ...next[idx], qty: next[idx].qty + qty };
-    else next.push({ pid: product.id, name: product.name, type: product.type, price, list, mode: priceMode, qty });
+    else
+      next.push({
+        pid: product.id,
+        name: edited ? edited.name : product.name,
+        type: product.type,
+        price,
+        list,
+        mode: priceMode,
+        qty,
+        ...(designId && { designId, design: edited.design }),
+      });
     setCart(next);
     setPickedProduct(null);
     setTab(goToPay ? "pay" : homeTab);
@@ -1041,6 +1106,9 @@ function App() {
       market: saleMarket ? saleMarket.name : null,
       cashReceived: cashInfo ? cashInfo.received : null,
       cashChange: cashInfo ? cashInfo.change : null,
+      // Only sent once the designs part of schema.sql has run (it adds
+      // these columns too); older projects would reject unknown columns.
+      ...(designsReady && { designId: l.designId || null, design: l.design || null }),
     }));
     save(
       { sales: [...lines, ...data.sales] },
@@ -1048,6 +1116,7 @@ function App() {
     );
     setReceipt({ total, account: account.name, method: account.method, lines: cart, note: note.trim() });
     setCart([]);
+    setGiftMode(false);
     setTagMarket(null);
     setNote("");
     setTab("done");
@@ -1315,7 +1384,7 @@ function App() {
       </button>
       <button className="tile" data-on={giftMode ? "1" : "0"} onClick={() => setGiftMode(!giftMode)}>
         <b>Gift</b>
-        <div className="pr">{giftMode ? "now tap a product ↑" : "give one away"}</div>
+        <div className="pr">{giftMode ? "tap products ↑ · tap here when done" : "give some away"}</div>
       </button>
     </div>
   );
@@ -1764,6 +1833,45 @@ function App() {
     );
   }
   if (!ready) return <div className="hl"><div className="empty">Opening BeeZness…</div></div>;
+
+  if (designPick) {
+    const product = designPick;
+    const available = stockOf(product.id) - inCartQty(product.id);
+    const pick = (design) => {
+      quickAdd(product, design);
+      setDesignPick(null);
+    };
+    const inBag = (designId) => cart.filter((l) => l.pid === product.id && (l.designId || null) === designId).reduce((t, l) => t + l.qty, 0);
+    return (
+      <div className="hl">
+        <button className="ghost" onClick={() => setDesignPick(null)}>
+          ← Back
+        </button>
+        <div style={{ margin: "18px 0 14px" }}>
+          <div className="cap">
+            {giftMode ? "Gift · " : ""}
+            {available} in stock · CHF {money(effectivePrice(product))}
+          </div>
+          <h1 className="xl">{product.name}</h1>
+          <div className="sub">Which one?</div>
+        </div>
+        <div className="designs">
+          {designsOf(product.id).map((d) => (
+            <button key={d.id} className="design" disabled={available <= 0} onClick={() => pick(d)}>
+              {inBag(d.id) > 0 && <span className="inbag">{inBag(d.id)}</span>}
+              <img src={d.photo} alt="" />
+              <b>{d.name}</b>
+            </button>
+          ))}
+          <button className="design" disabled={available <= 0} onClick={() => pick(null)}>
+            {inBag(null) > 0 && <span className="inbag">{inBag(null)}</span>}
+            <div className="nophoto">?</div>
+            <b>Other</b>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (pickedProduct) {
     const listPrice = effectivePrice(pickedProduct);
@@ -2871,6 +2979,7 @@ function App() {
           <div className="cap mb6">Market</div>
           <select value={statsMarket} onChange={(e) => setStatsMarket(e.target.value)}>
             <option value="all">All markets</option>
+            <option value="everywhere">All sales, every place</option>
             {marketNames.map((n) => (
               <option key={n} value={n}>
                 {n}
@@ -2884,7 +2993,7 @@ function App() {
             <>
               <div className="stat mt12">
                 <div>
-                  <div className="cap">Market days</div>
+                  <div className="cap">{statsMarket === "everywhere" ? "Days" : "Market days"}</div>
                   <div className="n">{stats.days}</div>
                 </div>
                 <div>
@@ -2900,7 +3009,8 @@ function App() {
               <hr className="rule" />
               <div className="cap">Average per day, by product</div>
               {stats.items.map((it) => (
-                <div className="row" key={it.pid}>
+                <div className="row" key={it.key}>
+                  {it.photo && <img className="thumb" src={it.photo} alt="" />}
                   <div className="grow">
                     <div className="t">{it.name}</div>
                     <div className="s">
@@ -3343,8 +3453,59 @@ function App() {
                   </div>
                 ))}
               </div>
+              {designsReady && (
+                <div className="designs small">
+                  {designsOf(p.id).map((d) => (
+                    <div key={d.id} className="design">
+                      <button
+                        className="x del"
+                        onClick={() => save({ designs: data.designs.filter((x) => x.id !== d.id) }, [{ table: "designs", type: "delete", id: d.id }])}
+                        aria-label="Remove design"
+                      >
+                        ×
+                      </button>
+                      <img src={d.photo} alt="" />
+                      <EditableField
+                        value={d.name}
+                        cls="name"
+                        onCommit={(v) =>
+                          save({ designs: data.designs.map((x) => (x.id === d.id ? { ...x, name: v } : x)) }, [
+                            { table: "designs", type: "update", id: d.id, row: { name: v } },
+                          ])
+                        }
+                      />
+                    </div>
+                  ))}
+                  <label className="design add">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      hidden
+                      onChange={async (e) => {
+                        const file = e.target.files && e.target.files[0];
+                        e.target.value = "";
+                        if (!file) return;
+                        try {
+                          const photo = await shrinkPhoto(file);
+                          const row = { id: uid(), pid: p.id, name: `Design ${designsOf(p.id).length + 1}`, photo, ts: Date.now() };
+                          save({ designs: [...data.designs, row] }, [{ table: "designs", type: "insert", id: row.id, row }]);
+                        } catch (err) {
+                          setToast({ msg: err.message });
+                        }
+                      }}
+                    />
+                    <div className="nophoto">+</div>
+                    <b>Add photo</b>
+                  </label>
+                </div>
+              )}
             </div>
           ))}
+          {designsReady === false && (
+            <div className="empty">
+              Photos for products (e.g. candle designs) aren't set up on the server yet. Run the designs part of supabase/schema.sql in Supabase, then reopen the app.
+            </div>
+          )}
           <button
             className="ghost solid mt14"
             onClick={() => {

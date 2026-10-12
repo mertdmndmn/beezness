@@ -171,3 +171,22 @@ alter table expenses enable row level security;
 drop policy if exists "authenticated full access" on expenses;
 create policy "authenticated full access" on expenses for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- Designs: photos to pick from when selling a product that comes in
+-- several looks (e.g. candle colours/shapes). The photo is a small JPEG
+-- data URL shrunk on the phone. Stock stays per product; the sale just
+-- records which design went. Additive and optional: the app runs without
+-- it, just without photos. Safe to run on its own in the SQL editor.
+create table if not exists designs (
+  id text primary key,
+  pid text not null references products(id) on delete cascade,
+  name text not null,
+  photo text not null,
+  ts bigint not null
+);
+alter table sales add column if not exists "designId" text;
+alter table sales add column if not exists design text;
+alter table designs enable row level security;
+drop policy if exists "authenticated full access" on designs;
+create policy "authenticated full access" on designs for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
