@@ -497,6 +497,8 @@ function App() {
   const [reportDay, setReportDay] = useState(() => dayKey(Date.now()));
   const [reportLoc, setReportLoc] = useState("all");
   const [statsMarket, setStatsMarket] = useState("all");
+  const [statsView, setStatsView] = useState("chart"); // "chart" | "list"
+  const [statsOpen, setStatsOpen] = useState(null); // bar tapped open for its details
   const [settlingId, setSettlingId] = useState(null);
   const [payAmount, setPayAmount] = useState("");
   const [payNote, setPayNote] = useState("");
@@ -3007,8 +3009,46 @@ function App() {
               </div>
 
               <hr className="rule" />
-              <div className="cap">Average per day, by product</div>
-              {stats.items.map((it) => (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div className="cap">Average per day, by product</div>
+                <div className="seg" style={{ margin: 0 }}>
+                  {[
+                    ["chart", "Chart"],
+                    ["list", "List"],
+                  ].map(([id, label]) => (
+                    <button key={id} data-on={statsView === id ? "1" : "0"} onClick={() => setStatsView(id)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {statsView === "chart" && (
+                <div className="bars">
+                  {stats.items.map((it) => {
+                    const max = stats.items[0].avg || 1;
+                    const open = statsOpen === it.key;
+                    return (
+                      <button key={it.key} className="bar" onClick={() => setStatsOpen(open ? null : it.key)}>
+                        <span className="bar-label">
+                          {it.photo && <img className="thumb" src={it.photo} alt="" />}
+                          <span className="grow">{it.name}</span>
+                          <span className="num">{avgStr(it.avg)}</span>
+                        </span>
+                        <span className="bar-track">
+                          <span className="bar-fill" style={{ width: `${Math.max(1.5, (it.avg / max) * 100)}%` }} />
+                        </span>
+                        {open && (
+                          <span className="bar-more">
+                            {it.qty} sold in {stats.days} {stats.days === 1 ? "day" : "days"} · best day {it.best} · CHF {money(it.sum)}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  <div className="empty">Bars show the average sold per day. Tap one for details.</div>
+                </div>
+              )}
+              {statsView === "list" && stats.items.map((it) => (
                 <div className="row" key={it.key}>
                   {it.photo && <img className="thumb" src={it.photo} alt="" />}
                   <div className="grow">
