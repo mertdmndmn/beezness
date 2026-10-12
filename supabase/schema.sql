@@ -198,3 +198,9 @@ create policy "authenticated full access" on designs for all
 alter table designs alter column pid drop not null;
 alter table designs add column if not exists type text;
 alter table batches add column if not exists "designId" text;
+
+-- Stock counts: typing a number into Jars records "there are N right now"
+-- here (qty still holds the difference, for older phones). Stock is then
+-- the latest count plus batches and sales after it, so a sale that syncs
+-- late from an offline phone isn't counted twice. Additive; safe to run.
+alter table batches add column if not exists "countedTo" numeric;

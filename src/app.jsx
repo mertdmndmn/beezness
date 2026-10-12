@@ -373,6 +373,8 @@ async function fetchAll() {
     ]);
     if (a.error || b.error) out.missing.push("designs+");
   }
+  const c = await supabase.from("batches").select("countedTo").limit(1);
+  if (c.error) out.missing.push("counts");
   return out;
 }
 
@@ -468,9 +470,14 @@ function shrinkPhoto(file, max = 360) {
 
 function EditableField({ value, onCommit, mono, cls, style, placeholder, list }) {
   const [text, setText] = useState(String(value));
-  useEffect(() => setText(String(value)), [value]);
+  // A live update (another phone's sale) must not wipe what's being typed.
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setText(String(value));
+  }, [value]);
   return (
     <input
+      onFocus={() => (focused.current = true)}
       className={cls}
       style={style}
       list={list}
@@ -479,6 +486,7 @@ function EditableField({ value, onCommit, mono, cls, style, placeholder, list })
       inputMode={mono ? "decimal" : undefined}
       onChange={(e) => setText(e.target.value)}
       onBlur={() => {
+        focused.current = false;
         if (mono) {
           const n = parseFloat(String(text).replace(",", "."));
           onCommit(isNaN(n) ? 0 : n);
@@ -532,6 +540,7 @@ function App() {
   const expensesReady = missingTables && !missingTables.includes("expenses");
   const designsReady = missingTables && !missingTables.includes("designs");
   const designsPlus = designsReady && !missingTables.includes("designs+");
+  const countsReady = missingTables && !missingTables.includes("counts");
   const [armed, setArmed] = useState(null); // id whose × was tapped once; a second tap deletes
   const arm = (id, doIt) => {
     if (armed === id) {
@@ -763,8 +772,22 @@ function App() {
       "honey-till-sync",
       TABLES.filter((t) => !OPTIONAL_TABLES.has(t))
     );
-    channel.subscribe((status) => {
-      if (status === "SUBSCRIBED") flushOutbox();
+    // Live updates missed while the connection was down are never replayed,
+    // so every (re)subscribe after the first pulls a fresh copy — otherwise
+    // a sale or undo from another phone stays missing until a reopen.
+    let first = true;
+    channel.subscribe(async (status) => {
+      if (status !== "SUBSCRIBED") return;
+      flushOutbox();
+      if (first) {
+        first = false;
+        return;
+      }
+      try {
+        const server = await fetchAll();
+        applyServer(server);
+        setMissingTables(server.missing);
+      } catch {}
     });
     return () => supabase.removeChannel(channel);
   }, [Boolean(session)]);
@@ -779,11 +802,29 @@ function App() {
   };
 
   // ---- derived state ----
+  // Typing a number into Jars is a stock count: "right now there are N".
+  // Stock is the latest count plus whatever came in or sold *after* it, by
+  // timestamp. So a sale that happened before the count but only syncs
+  // later (a phone offline at the market) isn't subtracted a second time —
+  // the jar was already gone when someone counted. Products never counted
+  // fall back to the plain sum of every batch minus every sale.
   const stockByPid = useMemo(() => {
     const m = {};
+    const lastCount = {};
+    data.batches.forEach((b) => {
+      if (b.countedTo == null) return;
+      if (!lastCount[b.pid] || b.ts > lastCount[b.pid].ts) lastCount[b.pid] = b;
+    });
     data.products.forEach((p) => (m[p.id] = 0));
-    data.batches.forEach((b) => (m[b.pid] = (m[b.pid] || 0) + Number(b.qty || 0)));
-    data.sales.forEach((s) => (m[s.pid] = (m[s.pid] || 0) - Number(s.qty || 0)));
+    data.batches.forEach((b) => {
+      const c = lastCount[b.pid];
+      if (c === b) m[b.pid] = (m[b.pid] || 0) + Number(b.countedTo);
+      else if (!c || (b.ts > c.ts && b.countedTo == null)) m[b.pid] = (m[b.pid] || 0) + Number(b.qty || 0);
+    });
+    data.sales.forEach((s) => {
+      const c = lastCount[s.pid];
+      if (!c || s.ts > c.ts) m[s.pid] = (m[s.pid] || 0) - Number(s.qty || 0);
+    });
     return m;
   }, [data.products, data.batches, data.sales]);
   const stockOf = (pid) => round2(stockByPid[pid] || 0);
@@ -3736,7 +3777,9 @@ function App() {
                   onCommit={(v) => {
                     const delta = round2(Number(v) - stockOf(p.id));
                     if (!delta) return;
-                    const row = { id: uid(), pid: p.id, qty: delta, ts: Date.now(), note: "adjustment" };
+                    // qty keeps the difference for older phones; countedTo is
+                    // what newer ones use (see stockByPid).
+                    const row = { id: uid(), pid: p.id, qty: delta, ts: Date.now(), note: "adjustment", ...(countsReady && { countedTo: Number(v) }) };
                     save({ batches: [row, ...data.batches] }, [{ table: "batches", type: "insert", id: row.id, row }]);
                   }}
                 />
