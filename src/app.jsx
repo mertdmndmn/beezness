@@ -40,6 +40,7 @@ const INVOICE_ACCOUNT = { id: "invoice", name: "Invoice", method: "Invoice", com
 const isInvoice = (s) => s.accountId === INVOICE_ACCOUNT.id;
 const unitsOf = (rows) => rows.reduce((s, x) => s + (x.pid === TIP_PID ? 0 : x.qty), 0);
 const MY_NAME_KEY = "honey-till-my-name";
+const MISSING_KEY = "honey-till-missing-tables";
 
 const PRODUCT_TYPES = ["Honey", "Candle", "Lip balm", "Other"];
 const PAYMENT_METHODS = ["TWINT", "Cash", "Bank transfer"];
@@ -564,7 +565,22 @@ function App() {
   // Which optional tables are missing on the server: null until a fetch
   // confirms either way (e.g. offline at boot). Moving a sale needs
   // sale_changes; recording an expense needs expenses.
-  const [missingTables, setMissingTables] = useState(null);
+  // Remembered from the last successful fetch, so a phone that opens with
+  // weak or no signal can still record an expense (it waits in the outbox
+  // like a sale) instead of sitting on "Waiting for connection…".
+  const [missingTables, setMissingTablesState] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(MISSING_KEY) || "null");
+    } catch {
+      return null;
+    }
+  });
+  const setMissingTables = (list) => {
+    setMissingTablesState(list);
+    try {
+      localStorage.setItem(MISSING_KEY, JSON.stringify(list));
+    } catch {}
+  };
   const historyReady = missingTables && !missingTables.includes("sale_changes");
   const expensesReady = missingTables && !missingTables.includes("expenses");
   const designsReady = missingTables && !missingTables.includes("designs");
@@ -4120,11 +4136,11 @@ function App() {
                     {e.repaidAt ? "Undo" : "Paid back"}
                   </button>
                   <button
-                    className="x"
-                    onClick={() => save({ expenses: data.expenses.filter((x) => x.id !== e.id) }, [{ table: "expenses", type: "delete", id: e.id }])}
+                    className={armed === e.id ? "armed" : "x"}
+                    onClick={() => arm(e.id, () => save({ expenses: data.expenses.filter((x) => x.id !== e.id) }, [{ table: "expenses", type: "delete", id: e.id }]))}
                     aria-label="Remove expense"
                   >
-                    ×
+                    {armed === e.id ? "Delete?" : "×"}
                   </button>
                 </div>
               ))}
