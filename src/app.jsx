@@ -2943,6 +2943,10 @@ function App() {
     const todayCash = todaySales.reduce((s, x) => s + x.qty * x.price, 0);
     const multiDayMarket = todaySales.length < marketSales.length;
     const marketProducts = activeMarket.items.map((item) => data.products.find((p) => p.id === item.pid)).filter(Boolean).sort(byName);
+    // Sold-out products drop out of the grid into a short line under the
+    // basket. Checked before the basket so tiles don't jump while adding.
+    const inStockProducts = marketProducts.filter((p) => stockOf(p.id) > 0);
+    const soldOutProducts = marketProducts.filter((p) => stockOf(p.id) <= 0);
     return (
       <div className="hl">
         <div className="top">
@@ -2985,7 +2989,7 @@ function App() {
         {marketProducts.length === 0 && (
           <div className="empty">No products picked for today — use "Edit name or today's table" below.</div>
         )}
-        {tileRows(marketProducts.filter(matchesSearch)).map((row) => (
+        {tileRows(inStockProducts.filter(matchesSearch)).map((row) => (
           <div className="tiles mb10" key={row[0].id}>
             {row.map((p) => {
               const available = stockOf(p.id) - inCartQty(p.id);
@@ -3008,6 +3012,12 @@ function App() {
         {tipPanel}
 
         {basketPanel}
+
+        {soldOutProducts.length > 0 && (
+          <div className="cap" style={{ margin: "4px 0 16px", lineHeight: 1.5 }}>
+            Sold out: {soldOutProducts.map((p) => p.name).join(", ")}
+          </div>
+        )}
 
         <hr className="rule" />
         <div className="cap">{multiDayMarket ? "Sales, all days" : "Today's sales"}</div>
