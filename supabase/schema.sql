@@ -224,3 +224,12 @@ alter table unit_costs enable row level security;
 drop policy if exists "authenticated full access" on unit_costs;
 create policy "authenticated full access" on unit_costs for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- Things you buy, priced once and shared by products: a unit_costs row with
+-- no pid is a supply ("100 stickers for CHF 15", unit "each"; "25 kg of
+-- honey for CHF 300", unit "kg"). A product's row then points at it (item)
+-- with how much one uses (qty). Additive; safe to run on its own.
+alter table unit_costs alter column pid drop not null;
+alter table unit_costs add column if not exists item text;
+alter table unit_costs add column if not exists qty numeric;
+alter table unit_costs add column if not exists unit text;

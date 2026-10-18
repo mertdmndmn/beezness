@@ -400,6 +400,12 @@ async function fetchAll() {
     const e = await supabase.from("expenses").select("market").limit(1);
     if (e.error) out.missing.push("expenses.market");
   }
+  // Shared "things you buy" (jars, stickers, honey per kg) that products
+  // pick from, instead of every product listing its own prices.
+  if (!out.missing.includes("unit_costs")) {
+    const u = await supabase.from("unit_costs").select("item,qty,unit").limit(1);
+    if (u.error) out.missing.push("unit_costs+");
+  }
   return out;
 }
 
@@ -588,7 +594,7 @@ function App() {
   const designsPlus = designsReady && !missingTables.includes("designs+");
   const countsReady = missingTables && !missingTables.includes("counts");
   const costMarketsReady = expensesReady && !missingTables.includes("expenses.market");
-  const unitCostsReady = missingTables && !missingTables.includes("unit_costs");
+  const unitCostsReady = missingTables && !missingTables.includes("unit_costs") && !missingTables.includes("unit_costs+");
   const [armed, setArmed] = useState(null); // id whose × was tapped once; a second tap deletes
   const arm = (id, doIt) => {
     if (armed === id) {
@@ -601,7 +607,7 @@ function App() {
   };
   const [search, setSearch] = useState("");
   const [profitPid, setProfitPid] = useState(null); // product open in "Profit per product"
-  const [unitDraft, setUnitDraft] = useState({ what: "", paid: "", makes: "" });
+  const [supplyDraft, setSupplyDraft] = useState(null); // { id?, what, paid, makes, unit } while adding/editing a thing you buy
   const [tryPrice, setTryPrice] = useState({}); // pid -> selling price typed to try out
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
@@ -1909,20 +1915,62 @@ function App() {
       list: [...data.expenses].sort((a, b) => b.ts - a.ts),
     };
   }, [data.expenses]);
-  // What one of a product costs to make: each line is something bought
-  // ("100 labels for CHF 15") spread over how many of the product it makes.
-  const unitCostOf = (pid) =>
-    round2(data.unit_costs.filter((c) => c.pid === pid).reduce((s, c) => s + (Number(c.paid) || 0) / (Number(c.makes) || 1), 0));
-  const addUnitCost = (pid) => {
-    const paid = parseFloat(String(unitDraft.paid).replace(",", "."));
-    const makes = parseFloat(String(unitDraft.makes).replace(",", ".")) || 1;
-    const what = unitDraft.what.trim();
-    if (isNaN(paid) || paid < 0 || makes <= 0 || !what || unitCostsReady !== true) return;
-    const row = { id: uid(), pid, what, paid: round2(paid), makes, ts: Date.now() };
-    save({ unit_costs: [...data.unit_costs, row] }, [{ table: "unit_costs", type: "insert", id: row.id, row }]);
-    setUnitDraft({ what: "", paid: "", makes: "" });
+  // What one of a product costs to make. "Supplies" are the things you buy
+  // (jar, sticker, honey), priced once (unit_costs rows with no pid: "100
+  // stickers for CHF 15"). A product's lines pick a supply and how much of
+  // it one uses (item, qty), so a new sticker price reaches every product.
+  // Lines with no item are older ones that carry their own price.
+  const supplies = useMemo(() => data.unit_costs.filter((c) => !c.pid).sort((a, b) => a.what.localeCompare(b.what)), [data.unit_costs]);
+  const perUnit = (c) => (Number(c.paid) || 0) / (Number(c.makes) || 1);
+  const UNIT_LABEL = { each: "each", kg: "per kg", g: "per g", l: "per litre" };
+  const lineCost = (c) => {
+    if (!c.item) return perUnit(c);
+    const supply = supplies.find((x) => x.id === c.item);
+    return supply ? perUnit(supply) * (Number(c.qty) || 0) : 0;
   };
-  // Products of one kind (every 500 g jar) mostly share jar, lid and label.
+  const unitCostOf = (pid) => round2(data.unit_costs.filter((c) => c.pid === pid).reduce((s, c) => s + lineCost(c), 0));
+  // Honey for a "Castagno 250 g" jar is 0.25 kg: read the size off the name.
+  const defaultQty = (product, supply) => {
+    const m = /(\d+(?:[.,]\d+)?)\s*(kg|g|gr)\b/i.exec(product.name || "");
+    if (!m || (supply.unit !== "kg" && supply.unit !== "g")) return 1;
+    const grams = parseFloat(m[1].replace(",", ".")) * (m[2].toLowerCase() === "kg" ? 1000 : 1);
+    return supply.unit === "kg" ? grams / 1000 : grams;
+  };
+  const saveSupply = () => {
+    const paid = parseFloat(String(supplyDraft.paid).replace(",", "."));
+    const makes = parseFloat(String(supplyDraft.makes).replace(",", ".")) || 1;
+    const what = supplyDraft.what.trim();
+    if (isNaN(paid) || paid < 0 || makes <= 0 || !what || unitCostsReady !== true) return;
+    const fields = { what, paid: round2(paid), makes, unit: supplyDraft.unit || "each" };
+    if (supplyDraft.id) {
+      save(
+        { unit_costs: data.unit_costs.map((c) => (c.id === supplyDraft.id ? { ...c, ...fields } : c)) },
+        [{ table: "unit_costs", type: "update", id: supplyDraft.id, row: fields }]
+      );
+    } else {
+      const row = { id: uid(), pid: null, item: null, qty: null, ts: Date.now(), ...fields };
+      save({ unit_costs: [...data.unit_costs, row] }, [{ table: "unit_costs", type: "insert", id: row.id, row }]);
+    }
+    setSupplyDraft(null);
+  };
+  // Removing a supply takes it out of every product that used it.
+  const deleteSupply = (id) => {
+    const gone = data.unit_costs.filter((c) => c.id === id || c.item === id);
+    save(
+      { unit_costs: data.unit_costs.filter((c) => !gone.includes(c)) },
+      gone.map((c) => ({ table: "unit_costs", type: "delete", id: c.id }))
+    );
+  };
+  const addSupplyTo = (product, supply) => {
+    const row = { id: uid(), pid: product.id, item: supply.id, qty: defaultQty(product, supply), what: supply.what, paid: 0, makes: 1, unit: null, ts: Date.now() };
+    save({ unit_costs: [...data.unit_costs, row] }, [{ table: "unit_costs", type: "insert", id: row.id, row }]);
+  };
+  const setSupplyQty = (c, value) => {
+    const qty = parseFloat(String(value).replace(",", "."));
+    if (isNaN(qty) || qty < 0 || qty === Number(c.qty)) return;
+    save({ unit_costs: data.unit_costs.map((x) => (x.id === c.id ? { ...x, qty } : x)) }, [{ table: "unit_costs", type: "update", id: c.id, row: { qty } }]);
+  };
+  // Products of one kind (every 500 g jar) mostly use the same supplies.
   const copyUnitCosts = (fromPid, toPid) => {
     const rows = data.unit_costs.filter((c) => c.pid === fromPid).map((c) => ({ ...c, id: uid(), pid: toPid, ts: Date.now() }));
     if (!rows.length) return;
@@ -4194,129 +4242,210 @@ function App() {
           <hr className="rule" />
           <div className="cap">Profit per product</div>
           <div className="empty pt0">
-            Write what goes into one: honey, jar, lid, label… Then try a selling price and see what you keep.
+            Write down the things you buy once (jars, lids, stickers, honey per kg). Then tick what each product uses and try a selling price.
           </div>
           {unitCostsReady === false ? (
             <div className="settle" style={{ borderColor: "var(--clay)", background: "var(--clay-soft)" }}>
               <div className="s">
-                Profit isn't switched on yet. Run the unit_costs part of supabase/schema.sql in the Supabase SQL editor, then refresh.
+                Profit needs the latest unit_costs part of supabase/schema.sql. Run it in the Supabase SQL editor, then refresh.
               </div>
             </div>
           ) : (
-            [...data.products].sort(byName).map((p) => {
-              const lines = data.unit_costs.filter((c) => c.pid === p.id).sort((a, b) => a.ts - b.ts);
-              const cost = unitCostOf(p.id);
-              const typed = tryPrice[p.id];
-              const price = typed != null ? parseFloat(String(typed).replace(",", ".")) || 0 : priceOf(p) || anyPriceOf(p);
-              const profit = round2(price - cost);
-              const open = profitPid === p.id;
-              const others = [...new Set(data.unit_costs.map((c) => c.pid))]
-                .filter((id) => id !== p.id)
-                .map((id) => data.products.find((x) => x.id === id))
-                .filter(Boolean)
-                .sort(byName);
-              return (
-                <div className={open ? "settle" : ""} key={p.id}>
-                  <div
-                    className="row"
-                    style={{ cursor: "pointer", borderBottom: open ? "none" : undefined }}
-                    onClick={() => {
-                      setProfitPid(open ? null : p.id);
-                      setUnitDraft({ what: "", paid: "", makes: "" });
-                    }}
-                  >
-                    <div className="grow">
-                      <div className="t">{p.name}</div>
-                      <div className="s">{lines.length ? `costs ${money(cost)} · sells ${money(price)}` : "no costs written yet"}</div>
+            <>
+              <div className="cap mt16 mb6">Things you buy</div>
+              {supplies.length === 0 && !supplyDraft && <div className="empty pt0">Nothing yet.</div>}
+              {supplies.map((c) =>
+                supplyDraft && supplyDraft.id === c.id ? null : (
+                  <div className="row" key={c.id}>
+                    <div
+                      className="grow"
+                      style={{ cursor: "pointer" }}
+                      onClick={() => setSupplyDraft({ id: c.id, what: c.what, paid: String(c.paid), makes: Number(c.makes) > 1 ? String(c.makes) : "", unit: c.unit || "each" })}
+                    >
+                      <div className="t">{c.what}</div>
+                      <div className="s">
+                        {Number(c.makes) > 1 ? `CHF ${money(c.paid)} for ${c.makes}${c.unit && c.unit !== "each" ? ` ${c.unit}` : ""} · ` : ""}
+                        tap to change
+                      </div>
                     </div>
-                    <div className="v" style={{ color: !lines.length ? undefined : profit > 0 ? "var(--sage)" : "var(--clay)" }}>
-                      {lines.length ? money(profit) : "—"}
+                    <div className="v">
+                      {perUnit(c) < 0.1 ? perUnit(c).toFixed(3) : money(perUnit(c))}
+                      <div className="s">{UNIT_LABEL[c.unit] || "each"}</div>
                     </div>
+                    <button
+                      className={armed === c.id ? "armed" : "x"}
+                      onClick={() => arm(c.id, () => deleteSupply(c.id))}
+                      aria-label="Remove"
+                    >
+                      {armed === c.id ? "Delete?" : "×"}
+                    </button>
                   </div>
-                  {open && (
-                    <>
-                      {lines.map((c) => (
-                        <div className="row" key={c.id}>
-                          <div className="grow">
-                            <div className="t">{c.what}</div>
-                            <div className="s">{Number(c.makes) > 1 ? `CHF ${money(c.paid)} for ${c.makes}` : "per one"}</div>
-                          </div>
-                          <div className="v">{money(Number(c.paid) / (Number(c.makes) || 1))}</div>
-                          <button
-                            className={armed === c.id ? "armed" : "x"}
-                            onClick={() => arm(c.id, () => save({ unit_costs: data.unit_costs.filter((x) => x.id !== c.id) }, [{ table: "unit_costs", type: "delete", id: c.id }]))}
-                            aria-label="Remove cost"
-                          >
-                            {armed === c.id ? "Delete?" : "×"}
-                          </button>
-                        </div>
-                      ))}
-
-                      <div className="cap mt16 mb6">Add a cost</div>
-                      <input
-                        value={unitDraft.what}
-                        onChange={(e) => setUnitDraft({ ...unitDraft, what: e.target.value })}
-                        placeholder="What, e.g. honey, jar, lid, label"
-                        style={{ width: "100%", marginBottom: 7, fontFamily: "'Barlow',sans-serif" }}
-                      />
-                      <div className="payrow" style={{ marginTop: 0 }}>
-                        <input
-                          inputMode="decimal"
-                          value={unitDraft.paid}
-                          onChange={(e) => setUnitDraft({ ...unitDraft, paid: e.target.value })}
-                          placeholder="Paid CHF"
-                          style={{ flex: 1, minWidth: 0 }}
-                        />
-                        <input
-                          inputMode="decimal"
-                          value={unitDraft.makes}
-                          onChange={(e) => setUnitDraft({ ...unitDraft, makes: e.target.value })}
-                          placeholder="For how many"
-                          style={{ flex: 1, minWidth: 0 }}
-                        />
-                      </div>
-                      <div className="s" style={{ marginTop: 6 }}>
-                        Bought 100 labels for CHF 15? Write 15 and 100. A bucket of honey that fills 50 jars? Its price and 50. Leave "for how many" empty if it's the price of one.
-                      </div>
-                      <button className="ghost solid wide mt8" disabled={unitCostsReady !== true} onClick={() => addUnitCost(p.id)}>
-                        {unitCostsReady === true ? "Add cost" : "Waiting for connection…"}
-                      </button>
-                      {!lines.length && others.length > 0 && (
-                        <select value="" onChange={(e) => e.target.value && copyUnitCosts(e.target.value, p.id)} style={{ width: "100%", marginTop: 7 }}>
-                          <option value="">…or copy the costs of another product</option>
-                          {others.map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {o.name}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-
-                      <div className="cap mt16 mb6">Selling price</div>
-                      <input
-                        inputMode="decimal"
-                        value={typed != null ? typed : money(price)}
-                        onChange={(e) => setTryPrice({ ...tryPrice, [p.id]: e.target.value })}
-                        placeholder="CHF"
-                        style={{ width: 120 }}
-                      />
-                      <div className="settle-head" style={{ marginTop: 12 }}>
-                        <div className="grow">
-                          <div className="cap">Costs {money(cost)} to make</div>
-                          <div className="s">{price > 0 ? `you keep ${Math.round((profit / price) * 100)}% of the price` : "type a price to see the profit"}</div>
-                        </div>
-                        <div style={{ textAlign: "right" }}>
-                          <div className="cap">Profit per one</div>
-                          <div className="num" style={{ fontSize: 24, fontWeight: 600, color: profit > 0 ? "var(--sage)" : "var(--clay)" }}>
-                            {money(profit)}
-                          </div>
-                        </div>
-                      </div>
-                    </>
-                  )}
+                )
+              )}
+              {supplyDraft ? (
+                <div className="settle">
+                  <div className="cap mb6">{supplyDraft.id ? "Change price" : "New thing you buy"}</div>
+                  <input
+                    value={supplyDraft.what}
+                    onChange={(e) => setSupplyDraft({ ...supplyDraft, what: e.target.value })}
+                    placeholder="What, e.g. Glass 250 g, Sticker, Honey"
+                    style={{ width: "100%", marginBottom: 7, fontFamily: "'Barlow',sans-serif" }}
+                  />
+                  <div className="payrow" style={{ marginTop: 0 }}>
+                    <input
+                      inputMode="decimal"
+                      value={supplyDraft.paid}
+                      onChange={(e) => setSupplyDraft({ ...supplyDraft, paid: e.target.value })}
+                      placeholder="Paid CHF"
+                      style={{ flex: 1, minWidth: 0 }}
+                    />
+                    <input
+                      inputMode="decimal"
+                      value={supplyDraft.makes}
+                      onChange={(e) => setSupplyDraft({ ...supplyDraft, makes: e.target.value })}
+                      placeholder="For how many"
+                      style={{ flex: 1, minWidth: 0 }}
+                    />
+                    <select value={supplyDraft.unit} onChange={(e) => setSupplyDraft({ ...supplyDraft, unit: e.target.value })} style={{ width: 80 }}>
+                      <option value="each">pieces</option>
+                      <option value="kg">kg</option>
+                      <option value="g">g</option>
+                      <option value="l">litres</option>
+                    </select>
+                  </div>
+                  <div className="s" style={{ marginTop: 6 }}>
+                    100 stickers for CHF 15: write 15, 100, pieces. A 25 kg bucket of honey for CHF 300: write 300, 25, kg. One glass for CHF 0.80: write 0.80 and leave "for how many" empty.
+                  </div>
+                  <div className="payrow">
+                    <button className="ghost solid wide" disabled={unitCostsReady !== true} onClick={saveSupply}>
+                      {unitCostsReady !== true ? "Waiting for connection…" : supplyDraft.id ? "Save new price" : "Save"}
+                    </button>
+                    <button className="ghost tiny" onClick={() => setSupplyDraft(null)}>
+                      ×
+                    </button>
+                  </div>
                 </div>
-              );
-            })
+              ) : (
+                <button className="ghost wide mb6" onClick={() => setSupplyDraft({ what: "", paid: "", makes: "", unit: "each" })}>
+                  Add a thing you buy
+                </button>
+              )}
+
+              <div className="cap mt16 mb6">Products</div>
+              {[...data.products].sort(byName).map((p) => {
+                const lines = data.unit_costs.filter((c) => c.pid === p.id).sort((a, b) => a.ts - b.ts);
+                const cost = unitCostOf(p.id);
+                const typed = tryPrice[p.id];
+                const price = typed != null ? parseFloat(String(typed).replace(",", ".")) || 0 : priceOf(p) || anyPriceOf(p);
+                const profit = round2(price - cost);
+                const open = profitPid === p.id;
+                const unused = supplies.filter((x) => !lines.some((c) => c.item === x.id));
+                const others = [...new Set(data.unit_costs.filter((c) => c.pid).map((c) => c.pid))]
+                  .filter((id) => id !== p.id)
+                  .map((id) => data.products.find((x) => x.id === id))
+                  .filter(Boolean)
+                  .sort(byName);
+                return (
+                  <div className={open ? "settle" : ""} key={p.id}>
+                    <div className="row" style={{ cursor: "pointer", borderBottom: open ? "none" : undefined }} onClick={() => setProfitPid(open ? null : p.id)}>
+                      <div className="grow">
+                        <div className="t">{p.name}</div>
+                        <div className="s">{lines.length ? `costs ${money(cost)} · sells ${money(price)}` : "nothing ticked yet"}</div>
+                      </div>
+                      <div className="v" style={{ color: !lines.length ? undefined : profit > 0 ? "var(--sage)" : "var(--clay)" }}>
+                        {lines.length ? money(profit) : "—"}
+                      </div>
+                    </div>
+                    {open && (
+                      <>
+                        {lines.map((c) => {
+                          const supply = c.item && supplies.find((x) => x.id === c.item);
+                          if (c.item && !supply) return null;
+                          return (
+                            <div className="row" key={c.id}>
+                              <div className="grow">
+                                <div className="t">{supply ? supply.what : c.what}</div>
+                                <div className="s">
+                                  {supply
+                                    ? `${money(perUnit(supply))} ${UNIT_LABEL[supply.unit] || "each"}`
+                                    : Number(c.makes) > 1
+                                      ? `CHF ${money(c.paid)} for ${c.makes}`
+                                      : "per one"}
+                                </div>
+                              </div>
+                              {supply && (
+                                <input
+                                  key={`${c.id}-${c.qty}`}
+                                  inputMode="decimal"
+                                  defaultValue={String(Number(c.qty))}
+                                  onBlur={(e) => setSupplyQty(c, e.target.value)}
+                                  aria-label="How much one uses"
+                                  style={{ width: 64, textAlign: "right" }}
+                                />
+                              )}
+                              {supply && <div className="s">{supply.unit && supply.unit !== "each" ? supply.unit : "×"}</div>}
+                              <div className="v">{money(lineCost(c))}</div>
+                              <button
+                                className={armed === c.id ? "armed" : "x"}
+                                onClick={() => arm(c.id, () => save({ unit_costs: data.unit_costs.filter((x) => x.id !== c.id) }, [{ table: "unit_costs", type: "delete", id: c.id }]))}
+                                aria-label="Remove"
+                              >
+                                {armed === c.id ? "Delete?" : "×"}
+                              </button>
+                            </div>
+                          );
+                        })}
+
+                        {unused.length > 0 && (
+                          <>
+                            <div className="cap mt16 mb6">Tap what one uses</div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {unused.map((x) => (
+                                <button key={x.id} className="ghost tiny" disabled={unitCostsReady !== true} onClick={() => addSupplyTo(p, x)}>
+                                  + {x.what}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                        {supplies.length === 0 && <div className="s mt8">Add the things you buy above first.</div>}
+                        {!lines.length && others.length > 0 && (
+                          <select value="" onChange={(e) => e.target.value && copyUnitCosts(e.target.value, p.id)} style={{ width: "100%", marginTop: 10 }}>
+                            <option value="">…or copy another product</option>
+                            {others.map((o) => (
+                              <option key={o.id} value={o.id}>
+                                {o.name}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+
+                        <div className="cap mt16 mb6">Selling price</div>
+                        <input
+                          inputMode="decimal"
+                          value={typed != null ? typed : money(price)}
+                          onChange={(e) => setTryPrice({ ...tryPrice, [p.id]: e.target.value })}
+                          placeholder="CHF"
+                          style={{ width: 120 }}
+                        />
+                        <div className="settle-head" style={{ marginTop: 12 }}>
+                          <div className="grow">
+                            <div className="cap">Costs {money(cost)} to make</div>
+                            <div className="s">{price > 0 ? `you keep ${Math.round((profit / price) * 100)}% of the price` : "type a price to see the profit"}</div>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <div className="cap">Profit per one</div>
+                            <div className="num" style={{ fontSize: 24, fontWeight: 600, color: profit > 0 ? "var(--sage)" : "var(--clay)" }}>
+                              {money(profit)}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </>
           )}
         </>
       )}
