@@ -208,3 +208,19 @@ alter table batches add column if not exists "countedTo" numeric;
 -- Which market a cost belongs to (stand fee, fuel), by market name, so
 -- Stats can show what each market actually kept. Additive; safe to run.
 alter table expenses add column if not exists market text;
+
+-- What one of a product costs to make, line by line ("100 labels for
+-- CHF 15" is paid 15, makes 100), so Costs can show the profit per jar.
+-- Additive and optional: the app runs without it. Safe to run on its own.
+create table if not exists unit_costs (
+  id text primary key,
+  pid text not null references products(id) on delete cascade,
+  what text not null,
+  paid numeric not null,
+  makes numeric not null default 1,
+  ts bigint not null
+);
+alter table unit_costs enable row level security;
+drop policy if exists "authenticated full access" on unit_costs;
+create policy "authenticated full access" on unit_costs for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');

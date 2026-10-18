@@ -13,15 +13,16 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes", "expenses", "designs"];
-const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [], expenses: [], designs: [] };
+const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes", "expenses", "designs", "unit_costs"];
+const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [], expenses: [], designs: [], unit_costs: [] };
 // Newer than the rest of the schema: a project that hasn't run that part of
 // schema.sql yet must still load, just without sale history (and without
 // the ability to move sales, since that would be a change with no record).
 // Same for expenses: no table, no Expenses tab.
 // Same for designs (product photos to pick from, e.g. candle colours): no
 // table, no Designs section and no picker.
-const OPTIONAL_TABLES = new Set(["sale_changes", "expenses", "designs"]);
+// Same for unit_costs (what one jar costs to make): no table, no profit.
+const OPTIONAL_TABLES = new Set(["sale_changes", "expenses", "designs", "unit_costs"]);
 
 const CACHE_KEY = "honey-till-cache-v1";
 const OUTBOX_KEY = "honey-till-outbox-v1";
@@ -587,6 +588,7 @@ function App() {
   const designsPlus = designsReady && !missingTables.includes("designs+");
   const countsReady = missingTables && !missingTables.includes("counts");
   const costMarketsReady = expensesReady && !missingTables.includes("expenses.market");
+  const unitCostsReady = missingTables && !missingTables.includes("unit_costs");
   const [armed, setArmed] = useState(null); // id whose × was tapped once; a second tap deletes
   const arm = (id, doIt) => {
     if (armed === id) {
@@ -598,6 +600,9 @@ function App() {
     setTimeout(() => setArmed((a) => (a === id ? null : a)), 3000);
   };
   const [search, setSearch] = useState("");
+  const [profitPid, setProfitPid] = useState(null); // product open in "Profit per product"
+  const [unitDraft, setUnitDraft] = useState({ what: "", paid: "", makes: "" });
+  const [tryPrice, setTryPrice] = useState({}); // pid -> selling price typed to try out
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
   const [showAllSales, setShowAllSales] = useState(false);
@@ -1904,6 +1909,25 @@ function App() {
       list: [...data.expenses].sort((a, b) => b.ts - a.ts),
     };
   }, [data.expenses]);
+  // What one of a product costs to make: each line is something bought
+  // ("100 labels for CHF 15") spread over how many of the product it makes.
+  const unitCostOf = (pid) =>
+    round2(data.unit_costs.filter((c) => c.pid === pid).reduce((s, c) => s + (Number(c.paid) || 0) / (Number(c.makes) || 1), 0));
+  const addUnitCost = (pid) => {
+    const paid = parseFloat(String(unitDraft.paid).replace(",", "."));
+    const makes = parseFloat(String(unitDraft.makes).replace(",", ".")) || 1;
+    const what = unitDraft.what.trim();
+    if (isNaN(paid) || paid < 0 || makes <= 0 || !what || unitCostsReady !== true) return;
+    const row = { id: uid(), pid, what, paid: round2(paid), makes, ts: Date.now() };
+    save({ unit_costs: [...data.unit_costs, row] }, [{ table: "unit_costs", type: "insert", id: row.id, row }]);
+    setUnitDraft({ what: "", paid: "", makes: "" });
+  };
+  // Products of one kind (every 500 g jar) mostly share jar, lid and label.
+  const copyUnitCosts = (fromPid, toPid) => {
+    const rows = data.unit_costs.filter((c) => c.pid === fromPid).map((c) => ({ ...c, id: uid(), pid: toPid, ts: Date.now() }));
+    if (!rows.length) return;
+    save({ unit_costs: [...data.unit_costs, ...rows] }, rows.map((row) => ({ table: "unit_costs", type: "insert", id: row.id, row })));
+  };
   const payerNames = [...new Set([...data.accounts.filter((a) => !a.common).map((a) => a.name), ...data.expenses.map((e) => e.paidBy)])];
 
   const clearTodaySales = () => {
@@ -4165,6 +4189,134 @@ function App() {
                 </div>
               ))}
             </>
+          )}
+
+          <hr className="rule" />
+          <div className="cap">Profit per product</div>
+          <div className="empty pt0">
+            Write what goes into one: honey, jar, lid, label… Then try a selling price and see what you keep.
+          </div>
+          {unitCostsReady === false ? (
+            <div className="settle" style={{ borderColor: "var(--clay)", background: "var(--clay-soft)" }}>
+              <div className="s">
+                Profit isn't switched on yet. Run the unit_costs part of supabase/schema.sql in the Supabase SQL editor, then refresh.
+              </div>
+            </div>
+          ) : (
+            [...data.products].sort(byName).map((p) => {
+              const lines = data.unit_costs.filter((c) => c.pid === p.id).sort((a, b) => a.ts - b.ts);
+              const cost = unitCostOf(p.id);
+              const typed = tryPrice[p.id];
+              const price = typed != null ? parseFloat(String(typed).replace(",", ".")) || 0 : priceOf(p) || anyPriceOf(p);
+              const profit = round2(price - cost);
+              const open = profitPid === p.id;
+              const others = [...new Set(data.unit_costs.map((c) => c.pid))]
+                .filter((id) => id !== p.id)
+                .map((id) => data.products.find((x) => x.id === id))
+                .filter(Boolean)
+                .sort(byName);
+              return (
+                <div className={open ? "settle" : ""} key={p.id}>
+                  <div
+                    className="row"
+                    style={{ cursor: "pointer", borderBottom: open ? "none" : undefined }}
+                    onClick={() => {
+                      setProfitPid(open ? null : p.id);
+                      setUnitDraft({ what: "", paid: "", makes: "" });
+                    }}
+                  >
+                    <div className="grow">
+                      <div className="t">{p.name}</div>
+                      <div className="s">{lines.length ? `costs ${money(cost)} · sells ${money(price)}` : "no costs written yet"}</div>
+                    </div>
+                    <div className="v" style={{ color: !lines.length ? undefined : profit > 0 ? "var(--sage)" : "var(--clay)" }}>
+                      {lines.length ? money(profit) : "—"}
+                    </div>
+                  </div>
+                  {open && (
+                    <>
+                      {lines.map((c) => (
+                        <div className="row" key={c.id}>
+                          <div className="grow">
+                            <div className="t">{c.what}</div>
+                            <div className="s">{Number(c.makes) > 1 ? `CHF ${money(c.paid)} for ${c.makes}` : "per one"}</div>
+                          </div>
+                          <div className="v">{money(Number(c.paid) / (Number(c.makes) || 1))}</div>
+                          <button
+                            className={armed === c.id ? "armed" : "x"}
+                            onClick={() => arm(c.id, () => save({ unit_costs: data.unit_costs.filter((x) => x.id !== c.id) }, [{ table: "unit_costs", type: "delete", id: c.id }]))}
+                            aria-label="Remove cost"
+                          >
+                            {armed === c.id ? "Delete?" : "×"}
+                          </button>
+                        </div>
+                      ))}
+
+                      <div className="cap mt16 mb6">Add a cost</div>
+                      <input
+                        value={unitDraft.what}
+                        onChange={(e) => setUnitDraft({ ...unitDraft, what: e.target.value })}
+                        placeholder="What, e.g. honey, jar, lid, label"
+                        style={{ width: "100%", marginBottom: 7, fontFamily: "'Barlow',sans-serif" }}
+                      />
+                      <div className="payrow" style={{ marginTop: 0 }}>
+                        <input
+                          inputMode="decimal"
+                          value={unitDraft.paid}
+                          onChange={(e) => setUnitDraft({ ...unitDraft, paid: e.target.value })}
+                          placeholder="Paid CHF"
+                          style={{ flex: 1, minWidth: 0 }}
+                        />
+                        <input
+                          inputMode="decimal"
+                          value={unitDraft.makes}
+                          onChange={(e) => setUnitDraft({ ...unitDraft, makes: e.target.value })}
+                          placeholder="For how many"
+                          style={{ flex: 1, minWidth: 0 }}
+                        />
+                      </div>
+                      <div className="s" style={{ marginTop: 6 }}>
+                        Bought 100 labels for CHF 15? Write 15 and 100. A bucket of honey that fills 50 jars? Its price and 50. Leave "for how many" empty if it's the price of one.
+                      </div>
+                      <button className="ghost solid wide mt8" disabled={unitCostsReady !== true} onClick={() => addUnitCost(p.id)}>
+                        {unitCostsReady === true ? "Add cost" : "Waiting for connection…"}
+                      </button>
+                      {!lines.length && others.length > 0 && (
+                        <select value="" onChange={(e) => e.target.value && copyUnitCosts(e.target.value, p.id)} style={{ width: "100%", marginTop: 7 }}>
+                          <option value="">…or copy the costs of another product</option>
+                          {others.map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+
+                      <div className="cap mt16 mb6">Selling price</div>
+                      <input
+                        inputMode="decimal"
+                        value={typed != null ? typed : money(price)}
+                        onChange={(e) => setTryPrice({ ...tryPrice, [p.id]: e.target.value })}
+                        placeholder="CHF"
+                        style={{ width: 120 }}
+                      />
+                      <div className="settle-head" style={{ marginTop: 12 }}>
+                        <div className="grow">
+                          <div className="cap">Costs {money(cost)} to make</div>
+                          <div className="s">{price > 0 ? `you keep ${Math.round((profit / price) * 100)}% of the price` : "type a price to see the profit"}</div>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div className="cap">Profit per one</div>
+                          <div className="num" style={{ fontSize: 24, fontWeight: 600, color: profit > 0 ? "var(--sage)" : "var(--clay)" }}>
+                            {money(profit)}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })
           )}
         </>
       )}
