@@ -1786,6 +1786,25 @@ function App() {
     </div>
   );
 
+  // Sold-out products leave the grid and sit greyed out under Tip and Gift,
+  // on the Sell tab and on market day alike.
+  const soldOutTiles = (products) =>
+    tileRows(products.filter(matchesSearch)).map((row) => (
+      <div className="tiles mb10" key={row[0].id}>
+        {row.map((p) => (
+          <button key={p.id} className="tile" disabled>
+            <b>{p.name}</b>
+            <div className="pr" data-noprice={effectivePrice(p) > 0 ? "0" : "1"}>
+              {effectivePrice(p) > 0 ? `CHF ${money(effectivePrice(p))}` : "no price set"}
+            </div>
+            <div className="st" data-low="1">
+              sold out
+            </div>
+          </button>
+        ))}
+      </div>
+    ));
+
   const tipPanel = tipping ? (
     <div style={{ background: "var(--ground)", border: "1px solid var(--comb)", borderRadius: 12, padding: "12px 13px", margin: "6px 0 12px" }}>
       <div className="cap mb6">Tip — how much?</div>
@@ -3083,21 +3102,7 @@ function App() {
 
         {tipPanel}
 
-        {tileRows(soldOutProducts.filter(matchesSearch)).map((row) => (
-          <div className="tiles mb10" key={row[0].id}>
-            {row.map((p) => (
-              <button key={p.id} className="tile" disabled>
-                <b>{p.name}</b>
-                <div className="pr" data-noprice={effectivePrice(p) > 0 ? "0" : "1"}>
-                  {effectivePrice(p) > 0 ? `CHF ${money(effectivePrice(p))}` : "no price set"}
-                </div>
-                <div className="st" data-low="1">
-                  sold out
-                </div>
-              </button>
-            ))}
-          </div>
-        ))}
+        {soldOutTiles(soldOutProducts)}
 
         {basketPanel}
 
@@ -3321,12 +3326,12 @@ function App() {
             <div className="empty">Nothing to sell yet. Open Admin and add your honey, candles and balms.</div>
           )}
           {search.trim() && !data.products.some(matchesSearch) && <div className="empty">No product matches "{search.trim()}".</div>}
-          {Object.keys(byType).filter((type) => byType[type].some(matchesSearch)).map((type) => (
+          {Object.keys(byType).filter((type) => byType[type].some((p) => matchesSearch(p) && stockOf(p.id) > 0)).map((type) => (
             <div key={type} style={{ marginBottom: 18 }}>
               <div className="cap" style={{ marginBottom: 9 }}>
                 {type}
               </div>
-              {tileRows(byType[type].filter(matchesSearch)).map((row) => (
+              {tileRows(byType[type].filter((p) => matchesSearch(p) && stockOf(p.id) > 0)).map((row) => (
                 <div className="tiles mb10" key={row[0].id}>
                   {row.map((p) => {
                     const available = stockOf(p.id) - inCartQty(p.id);
@@ -3350,8 +3355,9 @@ function App() {
 
           {tipPanel}
 
-          {basketPanel}
+          {soldOutTiles(Object.values(byType).flat().filter((p) => stockOf(p.id) <= 0))}
 
+          {basketPanel}
         </>
       )}
 
