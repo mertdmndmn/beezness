@@ -246,8 +246,11 @@ create table if not exists supply_moves (
   ts bigint not null,
   note text,
   pid text,
-  batch text
+  batch text,
+  "countedTo" numeric
 );
+-- A count ("there are N now") sets countedTo; qty still holds the difference.
+alter table supply_moves add column if not exists "countedTo" numeric;
 alter table supply_moves enable row level security;
 drop policy if exists "authenticated full access" on supply_moves;
 create policy "authenticated full access" on supply_moves for all

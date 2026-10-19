@@ -409,6 +409,10 @@ async function fetchAll() {
   }
   // What one jar cost to make when it sold, kept on the sale so a new lid
   // price never rewrites old margins. Unknown column = don't send it.
+  if (!out.missing.includes("supply_moves")) {
+    const sm = await supabase.from("supply_moves").select("countedTo").limit(1);
+    if (sm.error) out.missing.push("supply_moves");
+  }
   const sc = await supabase.from("sales").select("cost").limit(1);
   if (sc.error) out.missing.push("sales.cost");
   return out;
@@ -616,7 +620,7 @@ function App() {
   const [profitPid, setProfitPid] = useState(null); // product open in "Profit per product"
   const [supplyDraft, setSupplyDraft] = useState(null); // { id?, what, paid, makes, unit } while adding/editing a thing you buy
   const [tryPrice, setTryPrice] = useState({}); // pid -> selling price typed to try out
-  const [stockDraft, setStockDraft] = useState(null); // { id, mode: "bought" | "count", qty, paid } for a thing you buy
+  const [stockDraft, setStockDraft] = useState(null); // { id, mode: "bought" | "count", qty, paid, date } for a thing you buy
   const [bottling, setBottling] = useState(null); // { pid, n } while the Bottled form is open
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
@@ -2007,12 +2011,24 @@ function App() {
     if (!rows.length) return;
     save({ unit_costs: [...data.unit_costs, ...rows] }, rows.map((row) => ({ table: "unit_costs", type: "insert", id: row.id, row })));
   };
-  // Stock of things you buy is a log, like jars of honey: each purchase,
-  // count and bottling is a row (+bought, -used), and what's left is the
-  // sum, so two phones never overwrite one number.
+  // Stock of things you buy is a log, like jars of honey: each purchase and
+  // bottling is a row (+bought, -used), so two phones never overwrite one
+  // number. A count ("there are N now") works like a jar count: what's left
+  // is the latest count plus what came in or went out after it, by time, so
+  // a bottling that syncs late from an offline phone isn't taken twice.
   const supplyLeft = useMemo(() => {
+    const lastCount = {};
+    data.supply_moves.forEach((x) => {
+      if (x.countedTo == null) return;
+      if (!lastCount[x.item] || x.ts > lastCount[x.item].ts) lastCount[x.item] = x;
+    });
     const m = {};
-    data.supply_moves.forEach((x) => (m[x.item] = (m[x.item] || 0) + (Number(x.qty) || 0)));
+    data.supply_moves.forEach((x) => {
+      const c = lastCount[x.item];
+      if (c === x) m[x.item] = (m[x.item] || 0) + Number(x.countedTo);
+      else if (!c || (x.ts > c.ts && x.countedTo == null)) m[x.item] = (m[x.item] || 0) + (Number(x.qty) || 0);
+      else m[x.item] = m[x.item] || 0;
+    });
     Object.keys(m).forEach((k) => (m[k] = Math.round(m[k] * 1000) / 1000));
     return m;
   }, [data.supply_moves]);
@@ -2030,23 +2046,34 @@ function App() {
     if (stockDraft.mode === "bought") {
       const paid = parseFloat(String(stockDraft.paid).replace(",", "."));
       if (!(qty > 0) || isNaN(paid) || paid < 0) return;
-      // The latest purchase sets the price, so it can be checked against the invoice.
+      const today = new Date();
+      const picked = stockDraft.date ? new Date(`${stockDraft.date}T12:00:00`) : today;
+      const ts = picked.toDateString() === today.toDateString() ? Date.now() : picked.getTime();
+      // The newest purchase by date sets the price, so it can be checked
+      // against that invoice; typing in an older invoice later only adds stock.
+      const newest = !data.supply_moves.some((x) => x.item === supply.id && x.paid != null && Number(x.qty) > 0 && x.ts > ts);
       const fields = { paid: round2(paid), makes: qty };
-      const row = { id: uid(), item: supply.id, qty, paid: round2(paid), ts: Date.now(), note: "bought", pid: null, batch: null };
+      const row = { id: uid(), item: supply.id, qty, paid: round2(paid), ts, note: "bought", pid: null, batch: null, countedTo: null };
       save(
-        { supply_moves: [...data.supply_moves, row], unit_costs: data.unit_costs.map((c) => (c.id === supply.id ? { ...c, ...fields } : c)) },
+        {
+          supply_moves: [...data.supply_moves, row],
+          ...(newest && { unit_costs: data.unit_costs.map((c) => (c.id === supply.id ? { ...c, ...fields } : c)) }),
+        },
         [
           { table: "supply_moves", type: "insert", id: row.id, row },
-          { table: "unit_costs", type: "update", id: supply.id, row: fields },
+          ...(newest ? [{ table: "unit_costs", type: "update", id: supply.id, row: fields }] : []),
         ]
       );
-      setToast({ msg: `${supply.what}: +${qtyStr(qty)}, now CHF ${perUnit(fields) < 0.1 ? perUnit(fields).toFixed(3) : money(perUnit(fields))} ${UNIT_LABEL[supply.unit] || "each"}` });
+      setToast({
+        msg: newest
+          ? `${supply.what}: +${qtyStr(qty)}, now CHF ${perUnit(fields) < 0.1 ? perUnit(fields).toFixed(3) : money(perUnit(fields))} ${UNIT_LABEL[supply.unit] || "each"}`
+          : `${supply.what}: +${qtyStr(qty)}. Price kept from a newer purchase.`,
+      });
     } else {
       const delta = Math.round((qty - (supplyLeft[supply.id] || 0)) * 1000) / 1000;
-      if (delta) {
-        const row = { id: uid(), item: supply.id, qty: delta, paid: null, ts: Date.now(), note: "count", pid: null, batch: null };
-        save({ supply_moves: [...data.supply_moves, row] }, [{ table: "supply_moves", type: "insert", id: row.id, row }]);
-      }
+      // qty keeps the difference for reading the log; countedTo is what counts.
+      const row = { id: uid(), item: supply.id, qty: delta, paid: null, ts: Date.now(), note: "count", pid: null, batch: null, countedTo: qty };
+      save({ supply_moves: [...data.supply_moves, row] }, [{ table: "supply_moves", type: "insert", id: row.id, row }]);
     }
     setStockDraft(null);
   };
@@ -2063,7 +2090,7 @@ function App() {
     const now = Date.now();
     const batch = { id: uid(), pid: product.id, qty: n, ts: now, note: "bottled" };
     const moves = supplyMovesReady
-      ? bottlingUse(product.id, n).map((u) => ({ id: uid(), item: u.supply.id, qty: -u.qty, paid: null, ts: now, note: `bottled ${n} ${product.name}`, pid: product.id, batch: batch.id }))
+      ? bottlingUse(product.id, n).map((u) => ({ id: uid(), item: u.supply.id, qty: -u.qty, paid: null, ts: now, note: `bottled ${n} ${product.name}`, pid: product.id, batch: batch.id, countedTo: null }))
       : [];
     save({ batches: [batch, ...data.batches], supply_moves: [...data.supply_moves, ...moves] }, [
       { table: "batches", type: "insert", id: batch.id, row: batch },
@@ -2071,6 +2098,14 @@ function App() {
     ]);
     setBottling(null);
     setToast({ msg: `Bottled ${n} ${product.name}` });
+  };
+  // A mistaken bottling comes out whole: the jars and what it took.
+  const unbottle = (batch) => {
+    const moves = data.supply_moves.filter((x) => x.batch === batch.id);
+    save({ batches: data.batches.filter((b) => b.id !== batch.id), supply_moves: data.supply_moves.filter((x) => x.batch !== batch.id) }, [
+      { table: "batches", type: "delete", id: batch.id },
+      ...moves.map((x) => ({ table: "supply_moves", type: "delete", id: x.id })),
+    ]);
   };
   const hasRecipe = (pid) => data.unit_costs.some((c) => c.pid === pid && (!c.item || supplies.some((x) => x.id === c.item)));
   const payerNames = [...new Set([...data.accounts.filter((a) => !a.common).map((a) => a.name), ...data.expenses.map((e) => e.paidBy)])];
@@ -4403,7 +4438,7 @@ function App() {
                       <div className="s">{UNIT_LABEL[c.unit] || "each"}</div>
                     </div>
                     {supplyMovesReady && (
-                      <button className="ghost tiny" onClick={() => setStockDraft(stockDraft && stockDraft.id === c.id ? null : { id: c.id, mode: "bought", qty: "", paid: "" })}>
+                      <button className="ghost tiny" onClick={() => setStockDraft(stockDraft && stockDraft.id === c.id ? null : { id: c.id, mode: "bought", qty: "", paid: "", date: isoDate(new Date()) })}>
                         Stock
                       </button>
                     )}
@@ -4446,9 +4481,18 @@ function App() {
                           />
                         )}
                       </div>
+                      {stockDraft.mode === "bought" && (
+                        <input
+                          type="date"
+                          value={stockDraft.date}
+                          onChange={(e) => setStockDraft({ ...stockDraft, date: e.target.value })}
+                          aria-label="Invoice date"
+                          style={{ width: "100%", marginTop: 7, fontFamily: "'Barlow',sans-serif" }}
+                        />
+                      )}
                       <div className="s" style={{ marginTop: 6 }}>
                         {stockDraft.mode === "bought"
-                          ? "Adds to what's left, and this purchase becomes the price."
+                          ? "Adds to what's left. The newest purchase by date sets the price."
                           : "Sets what's left to this number, to fix it after counting. The price stays."}
                       </div>
                       <div className="payrow">
@@ -4726,6 +4770,8 @@ function App() {
                       const now = Date.now();
                       if (now - (lastStockTapRef.current[tapKey] || 0) < 800) return;
                       lastStockTapRef.current[tapKey] = now;
+                      // New jars are bottling: take the recipe out of the things you buy.
+                      if (supplyMovesReady) return bottle(p, n);
                       const row = { id: uid(), pid: p.id, qty: n, ts: now, note: null };
                       save({ batches: [row, ...data.batches] }, [{ table: "batches", type: "insert", id: row.id, row }]);
                     }}
@@ -4739,6 +4785,22 @@ function App() {
                   </button>
                 )}
               </div>
+              {(() => {
+                const last = data.batches
+                  .filter((b) => b.pid === p.id && b.note === "bottled" && Date.now() - b.ts < 24 * 3600 * 1000)
+                  .sort((a, b) => b.ts - a.ts)[0];
+                if (!last) return null;
+                return (
+                  <div className="s" style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span className="grow">
+                      Bottled {qtyStr(Number(last.qty))} at {timeStr(last.ts)}
+                    </span>
+                    <button className={armed === last.id ? "armed" : "ghost tiny"} onClick={() => arm(last.id, () => unbottle(last))}>
+                      {armed === last.id ? "Undo it?" : "Undo"}
+                    </button>
+                  </div>
+                );
+              })()}
               {bottling && bottling.pid === p.id && (() => {
                 const n = parseInt(bottling.n, 10) || 0;
                 const use = bottlingUse(p.id, n);
