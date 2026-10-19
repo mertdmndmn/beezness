@@ -4650,13 +4650,45 @@ function App() {
                         )}
 
                         <div className="cap mt16 mb6">Selling price</div>
+                        {(() => {
+                          // Prices you already sell at: each place, and each market
+                          // by name (its latest one that had this product).
+                          const latestMarket = {};
+                          data.markets.forEach((m) => {
+                            const item = (m.items || []).find((i) => i.pid === p.id);
+                            if (item && Number(item.price) > 0 && (!latestMarket[m.name] || m.startedAt > latestMarket[m.name].ts))
+                              latestMarket[m.name] = { ts: m.startedAt, price: Number(item.price) };
+                          });
+                          const options = [
+                            ...data.locations.filter((l) => priceOf(p, l.id) > 0).map((l) => [l.name, priceOf(p, l.id)]),
+                            ...Object.entries(latestMarket).map(([name, x]) => [name, x.price]),
+                          ];
+                          if (!options.length) return null;
+                          return (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                              {options.map(([name, v]) => (
+                                <button
+                                  key={name}
+                                  className={Math.abs(price - v) < 0.005 ? "ghost tiny solid" : "ghost tiny"}
+                                  onClick={() => setTryPrice({ ...tryPrice, [p.id]: money(v) })}
+                                >
+                                  {name} {money(v)}
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        })()}
                         <input
                           inputMode="decimal"
                           value={typed != null ? typed : money(price)}
                           onChange={(e) => setTryPrice({ ...tryPrice, [p.id]: e.target.value })}
                           placeholder="CHF"
+                          aria-label="Or type a price to try"
                           style={{ width: 120 }}
                         />
+                        <div className="s" style={{ marginTop: 4 }}>
+                          Tap a place or market, or type any price to try it.
+                        </div>
                         <div className="settle-head" style={{ marginTop: 12 }}>
                           <div className="grow">
                             <div className="cap">Costs {money(cost)} to make</div>
