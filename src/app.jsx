@@ -4557,7 +4557,10 @@ function App() {
                 </button>
               )}
 
-              <div className="cap mt16 mb6">Products</div>
+              <div className="cap mt16 mb6" style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Products</span>
+                <span>Profit per one, CHF</span>
+              </div>
               {[...data.products].sort(byName).map((p) => {
                 const lines = data.unit_costs.filter((c) => c.pid === p.id).sort((a, b) => a.ts - b.ts);
                 const cost = unitCostOf(p.id);
