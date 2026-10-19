@@ -233,3 +233,26 @@ alter table unit_costs alter column pid drop not null;
 alter table unit_costs add column if not exists item text;
 alter table unit_costs add column if not exists qty numeric;
 alter table unit_costs add column if not exists unit text;
+
+-- Stock of the things you buy (jars, lids, honey in kg), as a log: one row
+-- per purchase (+qty, paid), count (the difference) or bottling (-qty per
+-- jar's recipe, with the product and batch). What's left is the sum.
+-- Additive and optional; safe to run on its own.
+create table if not exists supply_moves (
+  id text primary key,
+  item text not null,
+  qty numeric not null,
+  paid numeric,
+  ts bigint not null,
+  note text,
+  pid text,
+  batch text
+);
+alter table supply_moves enable row level security;
+drop policy if exists "authenticated full access" on supply_moves;
+create policy "authenticated full access" on supply_moves for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- What one of the product cost to make at the moment it sold, so a new
+-- lid price never rewrites old margins. Older sales stay null (unknown).
+alter table sales add column if not exists cost numeric;

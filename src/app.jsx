@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
 
@@ -13,8 +13,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes", "expenses", "designs", "unit_costs"];
-const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [], expenses: [], designs: [], unit_costs: [] };
+const TABLES = ["locations", "products", "accounts", "batches", "sales", "transfers", "markets", "sale_changes", "expenses", "designs", "unit_costs", "supply_moves"];
+const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sales: [], transfers: [], markets: [], sale_changes: [], expenses: [], designs: [], unit_costs: [], supply_moves: [] };
 // Newer than the rest of the schema: a project that hasn't run that part of
 // schema.sql yet must still load, just without sale history (and without
 // the ability to move sales, since that would be a change with no record).
@@ -22,7 +22,8 @@ const EMPTY_DATA = { locations: [], products: [], accounts: [], batches: [], sal
 // Same for designs (product photos to pick from, e.g. candle colours): no
 // table, no Designs section and no picker.
 // Same for unit_costs (what one jar costs to make): no table, no profit.
-const OPTIONAL_TABLES = new Set(["sale_changes", "expenses", "designs", "unit_costs"]);
+// Same for supply_moves (stock of jars, lids, honey): no table, no counts.
+const OPTIONAL_TABLES = new Set(["sale_changes", "expenses", "designs", "unit_costs", "supply_moves"]);
 
 const CACHE_KEY = "honey-till-cache-v1";
 const OUTBOX_KEY = "honey-till-outbox-v1";
@@ -406,6 +407,10 @@ async function fetchAll() {
     const u = await supabase.from("unit_costs").select("item,qty,unit").limit(1);
     if (u.error) out.missing.push("unit_costs+");
   }
+  // What one jar cost to make when it sold, kept on the sale so a new lid
+  // price never rewrites old margins. Unknown column = don't send it.
+  const sc = await supabase.from("sales").select("cost").limit(1);
+  if (sc.error) out.missing.push("sales.cost");
   return out;
 }
 
@@ -595,6 +600,8 @@ function App() {
   const countsReady = missingTables && !missingTables.includes("counts");
   const costMarketsReady = expensesReady && !missingTables.includes("expenses.market");
   const unitCostsReady = missingTables && !missingTables.includes("unit_costs") && !missingTables.includes("unit_costs+");
+  const supplyMovesReady = unitCostsReady && !missingTables.includes("supply_moves");
+  const saleCostReady = missingTables && !missingTables.includes("sales.cost");
   const [armed, setArmed] = useState(null); // id whose × was tapped once; a second tap deletes
   const arm = (id, doIt) => {
     if (armed === id) {
@@ -609,6 +616,8 @@ function App() {
   const [profitPid, setProfitPid] = useState(null); // product open in "Profit per product"
   const [supplyDraft, setSupplyDraft] = useState(null); // { id?, what, paid, makes, unit } while adding/editing a thing you buy
   const [tryPrice, setTryPrice] = useState({}); // pid -> selling price typed to try out
+  const [stockDraft, setStockDraft] = useState(null); // { id, mode: "bought" | "count", qty, paid } for a thing you buy
+  const [bottling, setBottling] = useState(null); // { pid, n } while the Bottled form is open
   const [expDraft, setExpDraft] = useState(null); // { paidBy, what, amount, date } while the add form is open
   const [moving, setMoving] = useState(null); // { ticket, toId, by, note } while the move form is open
   const [showAllSales, setShowAllSales] = useState(false);
@@ -1475,6 +1484,8 @@ function App() {
       // Only sent once the designs part of schema.sql has run (it adds
       // these columns too); older projects would reject unknown columns.
       ...(designsReady && { designId: l.designId || null, design: l.design || null }),
+      // Cost to make one, as the recipe prices it right now; no recipe = unknown.
+      ...(saleCostReady && { cost: hasRecipe(l.pid) ? unitCostOf(l.pid) : null }),
     }));
     save(
       { sales: [...lines, ...data.sales] },
@@ -1975,10 +1986,11 @@ function App() {
   // Removing a supply takes it out of every product that used it.
   const deleteSupply = (id) => {
     const gone = data.unit_costs.filter((c) => c.id === id || c.item === id);
-    save(
-      { unit_costs: data.unit_costs.filter((c) => !gone.includes(c)) },
-      gone.map((c) => ({ table: "unit_costs", type: "delete", id: c.id }))
-    );
+    const moves = data.supply_moves.filter((x) => x.item === id);
+    save({ unit_costs: data.unit_costs.filter((c) => !gone.includes(c)), supply_moves: data.supply_moves.filter((x) => x.item !== id) }, [
+      ...gone.map((c) => ({ table: "unit_costs", type: "delete", id: c.id })),
+      ...moves.map((x) => ({ table: "supply_moves", type: "delete", id: x.id })),
+    ]);
   };
   const addSupplyTo = (product, supply) => {
     const row = { id: uid(), pid: product.id, item: supply.id, qty: defaultQty(product, supply), what: supply.what, paid: 0, makes: 1, unit: null, ts: Date.now() };
@@ -1995,6 +2007,72 @@ function App() {
     if (!rows.length) return;
     save({ unit_costs: [...data.unit_costs, ...rows] }, rows.map((row) => ({ table: "unit_costs", type: "insert", id: row.id, row })));
   };
+  // Stock of things you buy is a log, like jars of honey: each purchase,
+  // count and bottling is a row (+bought, -used), and what's left is the
+  // sum, so two phones never overwrite one number.
+  const supplyLeft = useMemo(() => {
+    const m = {};
+    data.supply_moves.forEach((x) => (m[x.item] = (m[x.item] || 0) + (Number(x.qty) || 0)));
+    Object.keys(m).forEach((k) => (m[k] = Math.round(m[k] * 1000) / 1000));
+    return m;
+  }, [data.supply_moves]);
+  const qtyStr = (q) => String(Math.round(q * 1000) / 1000);
+  // The most one product uses of a supply, to say how many jars are left in it.
+  const jarsLeftOf = (supply) => {
+    const most = Math.max(0, ...data.unit_costs.filter((c) => c.pid && c.item === supply.id).map((c) => Number(c.qty) || 0));
+    return most > 0 ? Math.floor((supplyLeft[supply.id] || 0) / most) : null;
+  };
+  const LOW_JARS = 30;
+  const saveSupplyStock = () => {
+    const supply = supplies.find((x) => x.id === stockDraft.id);
+    const qty = parseFloat(String(stockDraft.qty).replace(",", "."));
+    if (!supply || isNaN(qty) || qty < 0 || supplyMovesReady !== true) return;
+    if (stockDraft.mode === "bought") {
+      const paid = parseFloat(String(stockDraft.paid).replace(",", "."));
+      if (!(qty > 0) || isNaN(paid) || paid < 0) return;
+      // The latest purchase sets the price, so it can be checked against the invoice.
+      const fields = { paid: round2(paid), makes: qty };
+      const row = { id: uid(), item: supply.id, qty, paid: round2(paid), ts: Date.now(), note: "bought", pid: null, batch: null };
+      save(
+        { supply_moves: [...data.supply_moves, row], unit_costs: data.unit_costs.map((c) => (c.id === supply.id ? { ...c, ...fields } : c)) },
+        [
+          { table: "supply_moves", type: "insert", id: row.id, row },
+          { table: "unit_costs", type: "update", id: supply.id, row: fields },
+        ]
+      );
+      setToast({ msg: `${supply.what}: +${qtyStr(qty)}, now CHF ${perUnit(fields) < 0.1 ? perUnit(fields).toFixed(3) : money(perUnit(fields))} ${UNIT_LABEL[supply.unit] || "each"}` });
+    } else {
+      const delta = Math.round((qty - (supplyLeft[supply.id] || 0)) * 1000) / 1000;
+      if (delta) {
+        const row = { id: uid(), item: supply.id, qty: delta, paid: null, ts: Date.now(), note: "count", pid: null, batch: null };
+        save({ supply_moves: [...data.supply_moves, row] }, [{ table: "supply_moves", type: "insert", id: row.id, row }]);
+      }
+    }
+    setStockDraft(null);
+  };
+  // What bottling n of a product takes out of the things you buy.
+  const bottlingUse = (pid, n) =>
+    data.unit_costs
+      .filter((c) => c.pid === pid && c.item)
+      .map((c) => ({ supply: supplies.find((x) => x.id === c.item), qty: Math.round((Number(c.qty) || 0) * n * 1000) / 1000 }))
+      .filter((u) => u.supply && u.qty > 0);
+  // Bottling adds jars like +12 does, and draws the recipe down from the
+  // things you buy. A stock count never does: it's a correction.
+  const bottle = (product, n) => {
+    if (!(n > 0)) return;
+    const now = Date.now();
+    const batch = { id: uid(), pid: product.id, qty: n, ts: now, note: "bottled" };
+    const moves = supplyMovesReady
+      ? bottlingUse(product.id, n).map((u) => ({ id: uid(), item: u.supply.id, qty: -u.qty, paid: null, ts: now, note: `bottled ${n} ${product.name}`, pid: product.id, batch: batch.id }))
+      : [];
+    save({ batches: [batch, ...data.batches], supply_moves: [...data.supply_moves, ...moves] }, [
+      { table: "batches", type: "insert", id: batch.id, row: batch },
+      ...moves.map((row) => ({ table: "supply_moves", type: "insert", id: row.id, row })),
+    ]);
+    setBottling(null);
+    setToast({ msg: `Bottled ${n} ${product.name}` });
+  };
+  const hasRecipe = (pid) => data.unit_costs.some((c) => c.pid === pid && (!c.item || supplies.some((x) => x.id === c.item)));
   const payerNames = [...new Set([...data.accounts.filter((a) => !a.common).map((a) => a.name), ...data.expenses.map((e) => e.paidBy)])];
 
   const clearTodaySales = () => {
@@ -2076,14 +2154,26 @@ function App() {
 
     // ---- Sales ----
     const salesSheet = wb.addWorksheet("Sales", { views: [{ state: "frozen", ySplit: 3 }] });
-    salesSheet.columns = [multiDay ? 14 : 8, 11, 11, 12, 24, 10, 6, 10, 12, 14, 10, 15, 11, 24].map((width) => ({ width }));
+    salesSheet.columns = [multiDay ? 14 : 8, 11, 11, 12, 24, 10, 6, 10, 12, 14, 10, 12, 10, 15, 11, 24].map((width) => ({ width }));
 
     styleTitleRow(salesSheet.addRow(["Z report", when, reportLoc === "all" ? "All places" : locationName(reportLoc)]));
     salesSheet.addRow([]);
     styleHeaderRow(
-      salesSheet.addRow(["Time", "Sale no.", "Place", "Market", "Item", "Category", "Qty", "List CHF", "Charged CHF", "Line total CHF", "Price", "Paid to", "Method", "Note"])
+      salesSheet.addRow(["Time", "Sale no.", "Place", "Market", "Item", "Category", "Qty", "List CHF", "Charged CHF", "Line total CHF", "Cost CHF", "Margin CHF", "Price", "Paid to", "Method", "Note"])
     );
+    // Cost is what the jar cost to make when it sold (kept on the sale).
+    // Sales from before costs were tracked have none: left blank, and out
+    // of the margin total rather than counted as free.
+    const lineCostOf = (s) => (s.cost != null && s.pid !== TIP_PID ? round2(Number(s.cost) * s.qty) : null);
+    let costTotal = 0;
+    let marginTotal = 0;
+    let unknownCostUnits = 0;
     report.rows.forEach((s) => {
+      const cost = lineCostOf(s);
+      if (cost != null) {
+        costTotal += cost;
+        marginTotal += s.qty * s.price - cost;
+      } else if (s.pid !== TIP_PID) unknownCostUnits += s.qty;
       const row = salesSheet.addRow([
         saleTime(s.ts),
         s.ticket,
@@ -2095,24 +2185,30 @@ function App() {
         s.list,
         s.price,
         round2(s.qty * s.price),
+        cost != null ? cost : "",
+        cost != null ? round2(s.qty * s.price - cost) : "",
         s.mode === "gift" ? "Gift" : s.price < s.list ? "Reduced" : "Full",
         s.account,
         s.method,
         s.note || "",
       ]);
       row.getCell(7).numFmt = XLSX_INT_FMT;
-      [8, 9, 10].forEach((c) => (row.getCell(c).numFmt = XLSX_MONEY_FMT));
+      [8, 9, 10, 11, 12].forEach((c) => (row.getCell(c).numFmt = XLSX_MONEY_FMT));
     });
 
     salesSheet.addRow([]);
-    const salesTotalRow = salesSheet.addRow(["", "", "", "", "", "", report.units, "", "", round2(report.total), "TOTAL", "", "", ""]);
+    const salesTotalRow = salesSheet.addRow(["", "", "", "", "", "", report.units, "", "", round2(report.total), round2(costTotal), round2(marginTotal), "TOTAL", "", "", ""]);
     salesTotalRow.getCell(7).numFmt = XLSX_INT_FMT;
-    salesTotalRow.getCell(10).numFmt = XLSX_MONEY_FMT;
+    [10, 11, 12].forEach((c) => (salesTotalRow.getCell(c).numFmt = XLSX_MONEY_FMT));
     styleTotalRow(salesTotalRow);
-    const giftsRow = salesSheet.addRow(["", "", "", "", "", "", report.gifts, "", "", "", "gifted jars", "", "", ""]);
+    const giftsRow = salesSheet.addRow(["", "", "", "", "", "", report.gifts, "", "", "", "", "", "gifted jars", "", "", ""]);
     giftsRow.getCell(7).numFmt = XLSX_INT_FMT;
-    const discountRow = salesSheet.addRow(["", "", "", "", "", "", "", "", "", round2(report.discount), "given as discount", "", "", ""]);
+    const discountRow = salesSheet.addRow(["", "", "", "", "", "", "", "", "", round2(report.discount), "", "", "given as discount", "", "", ""]);
     discountRow.getCell(10).numFmt = XLSX_MONEY_FMT;
+    if (unknownCostUnits > 0) {
+      const unknownRow = salesSheet.addRow(["", "", "", "", "", "", unknownCostUnits, "", "", "", "", "", "items with no cost recorded, not in the margin", "", "", ""]);
+      unknownRow.getCell(7).numFmt = XLSX_INT_FMT;
+    }
 
     const addMoneySection = (title, entries) => {
       salesSheet.addRow([]);
@@ -2159,6 +2255,19 @@ function App() {
     stockTotalRow.getCell(3).numFmt = XLSX_INT_FMT;
     stockTotalRow.getCell(valueColIdx).numFmt = XLSX_MONEY_FMT;
     styleTotalRow(stockTotalRow);
+
+    // Jars, lids, honey: what's left today and what it's worth at the latest price.
+    const trackedSupplies = supplies.filter((c) => c.id in supplyLeft);
+    if (trackedSupplies.length) {
+      stockSheet.addRow([]);
+      styleSectionRow(stockSheet.addRow(["Things you buy"]));
+      styleHeaderRow(stockSheet.addRow(["Supply", "Unit", "Left", "Unit cost CHF", "Value CHF"]));
+      trackedSupplies.forEach((c) => {
+        const row = stockSheet.addRow([c.what, c.unit || "each", supplyLeft[c.id], perUnit(c), round2(supplyLeft[c.id] * perUnit(c))]);
+        row.getCell(4).numFmt = "0.000";
+        row.getCell(5).numFmt = XLSX_MONEY_FMT;
+      });
+    }
 
     // ---- Settlement ----
     const settleSheet = wb.addWorksheet("Settlement", { views: [{ state: "frozen", ySplit: 3 }] });
@@ -2228,7 +2337,7 @@ function App() {
   };
 
   const copyCsv = async () => {
-    const lines = ["Time,Sale no.,Place,Market,Item,Qty,List CHF,Charged CHF,Line total CHF,Price,Paid to,Method,Note"];
+    const lines = ["Time,Sale no.,Place,Market,Item,Qty,List CHF,Charged CHF,Line total CHF,Cost CHF,Margin CHF,Price,Paid to,Method,Note"];
     report.rows.forEach((s) =>
       lines.push(
         [
@@ -2241,6 +2350,8 @@ function App() {
           money(s.list),
           money(s.price),
           money(s.qty * s.price),
+          s.cost != null && s.pid !== TIP_PID ? money(Number(s.cost) * s.qty) : "",
+          s.cost != null && s.pid !== TIP_PID ? money(s.qty * s.price - Number(s.cost) * s.qty) : "",
           s.mode === "gift" ? "Gift" : s.price < s.list ? "Reduced" : "Full",
           s.account,
           s.method,
@@ -4262,7 +4373,8 @@ function App() {
               {supplies.length === 0 && !supplyDraft && <div className="empty pt0">Nothing yet.</div>}
               {supplies.map((c) =>
                 supplyDraft && supplyDraft.id === c.id ? null : (
-                  <div className="row" key={c.id}>
+                  <Fragment key={c.id}>
+                  <div className="row">
                     <div
                       className="grow"
                       style={{ cursor: "pointer" }}
@@ -4273,11 +4385,28 @@ function App() {
                         {Number(c.makes) > 1 ? `CHF ${money(c.paid)} for ${c.makes}${c.unit && c.unit !== "each" ? ` ${c.unit}` : ""} · ` : ""}
                         tap to change
                       </div>
+                      {c.id in supplyLeft && (() => {
+                        const jars = jarsLeftOf(c);
+                        const low = supplyLeft[c.id] <= 0 || (jars != null && jars < LOW_JARS);
+                        return (
+                          <div className="s" style={{ color: low ? "var(--clay)" : undefined, fontWeight: low ? 600 : undefined }}>
+                            {qtyStr(supplyLeft[c.id])}
+                            {c.unit && c.unit !== "each" ? ` ${c.unit}` : ""} left
+                            {jars != null ? ` · enough for ${Math.max(0, jars)} jars` : ""}
+                            {low ? " · running low" : ""}
+                          </div>
+                        );
+                      })()}
                     </div>
                     <div className="v">
                       {perUnit(c) < 0.1 ? perUnit(c).toFixed(3) : money(perUnit(c))}
                       <div className="s">{UNIT_LABEL[c.unit] || "each"}</div>
                     </div>
+                    {supplyMovesReady && (
+                      <button className="ghost tiny" onClick={() => setStockDraft(stockDraft && stockDraft.id === c.id ? null : { id: c.id, mode: "bought", qty: "", paid: "" })}>
+                        Stock
+                      </button>
+                    )}
                     <button
                       className={armed === c.id ? "armed" : "x"}
                       onClick={() => arm(c.id, () => deleteSupply(c.id))}
@@ -4286,6 +4415,53 @@ function App() {
                       {armed === c.id ? "Delete?" : "×"}
                     </button>
                   </div>
+                  {stockDraft && stockDraft.id === c.id && (
+                    <div className="settle">
+                      <div className="payrow" style={{ marginTop: 0 }}>
+                        {[
+                          ["bought", "Bought"],
+                          ["count", "Counted"],
+                        ].map(([mode, label]) => (
+                          <button key={mode} className={stockDraft.mode === mode ? "ghost solid" : "ghost"} style={{ flex: 1 }} onClick={() => setStockDraft({ ...stockDraft, mode })}>
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="payrow">
+                        <input
+                          autoFocus
+                          inputMode="decimal"
+                          value={stockDraft.qty}
+                          onChange={(e) => setStockDraft({ ...stockDraft, qty: e.target.value })}
+                          placeholder={stockDraft.mode === "bought" ? `How many ${c.unit && c.unit !== "each" ? c.unit : "pieces"}` : `${c.unit && c.unit !== "each" ? c.unit : "Pieces"} there are now`}
+                          style={{ flex: 1, minWidth: 0 }}
+                        />
+                        {stockDraft.mode === "bought" && (
+                          <input
+                            inputMode="decimal"
+                            value={stockDraft.paid}
+                            onChange={(e) => setStockDraft({ ...stockDraft, paid: e.target.value })}
+                            placeholder="Paid CHF, total"
+                            style={{ flex: 1, minWidth: 0 }}
+                          />
+                        )}
+                      </div>
+                      <div className="s" style={{ marginTop: 6 }}>
+                        {stockDraft.mode === "bought"
+                          ? "Adds to what's left, and this purchase becomes the price."
+                          : "Sets what's left to this number, to fix it after counting. The price stays."}
+                      </div>
+                      <div className="payrow">
+                        <button className="ghost solid wide" onClick={saveSupplyStock}>
+                          Save
+                        </button>
+                        <button className="ghost tiny" onClick={() => setStockDraft(null)}>
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  </Fragment>
                 )
               )}
               {supplyDraft ? (
@@ -4557,7 +4733,53 @@ function App() {
                     +{n}
                   </button>
                 ))}
+                {supplyMovesReady && (
+                  <button className="ghost tiny" onClick={() => setBottling(bottling && bottling.pid === p.id ? null : { pid: p.id, n: "" })}>
+                    Bottled
+                  </button>
+                )}
               </div>
+              {bottling && bottling.pid === p.id && (() => {
+                const n = parseInt(bottling.n, 10) || 0;
+                const use = bottlingUse(p.id, n);
+                return (
+                  <div className="settle" style={{ marginTop: 8 }}>
+                    <div className="payrow" style={{ marginTop: 0 }}>
+                      <input
+                        autoFocus
+                        inputMode="numeric"
+                        value={bottling.n}
+                        onChange={(e) => setBottling({ ...bottling, n: e.target.value })}
+                        placeholder="How many jars"
+                        style={{ flex: 1, minWidth: 0 }}
+                      />
+                      <button className="ghost solid" disabled={!(n > 0)} onClick={() => bottle(p, n)}>
+                        Bottle
+                      </button>
+                      <button className="ghost tiny" onClick={() => setBottling(null)}>
+                        ×
+                      </button>
+                    </div>
+                    <div className="s" style={{ marginTop: 6 }}>
+                      {!hasRecipe(p.id)
+                        ? "No recipe yet (Costs → Profit per product), so only the jars are added."
+                        : n > 0
+                          ? use.map((u) => {
+                              const short = u.supply.id in supplyLeft && supplyLeft[u.supply.id] < u.qty;
+                              return (
+                                <div key={u.supply.id} style={{ color: short ? "var(--clay)" : undefined }}>
+                                  takes {qtyStr(u.qty)}
+                                  {u.supply.unit && u.supply.unit !== "each" ? ` ${u.supply.unit}` : "×"} {u.supply.what}
+                                  {u.supply.id in supplyLeft ? ` · ${qtyStr(supplyLeft[u.supply.id])} left` : ""}
+                                  {short ? " · not enough" : ""}
+                                </div>
+                              );
+                            })
+                          : "Adds the jars and takes what they use from the things you buy."}
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="prices">
                 {data.locations.map((l) => (
                   <div className="pricebox" key={l.id}>
